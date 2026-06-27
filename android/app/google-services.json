@@ -1,0 +1,142 @@
+{
+  "project_info": {
+    "project_number": "755660062071",
+    "project_id": "fastrider-9ef05",
+    "storage_bucket": "fastrider-9ef05.firebasestorage.app"
+  },
+  "client": [
+    {
+      "client_info": {
+        "mobilesdk_app_id": "1:755660062071:android:e4a98b2e855bc33db03572",
+        "android_client_info": {
+          "package_name": "com.example.fast_ride"
+        }
+      },
+      "oauth_client": [
+        {
+          "client_id": "755660062071-us4m34rirnftsm6tu6mjiosjvk4tba8n.apps.googleusercontent.com",
+          "client_type": 3
+        }
+      ],
+      "api_key": [
+        {
+          "current_key": "AIzaSyBQGoJP1neuHbjasEWdFf9Kx4QRKmCv9S4"
+        }
+      ],
+      "services": {
+        "appinvite_service": {
+          "other_platform_oauth_client": [
+            {
+              "client_id": "755660062071-us4m34rirnftsm6tu6mjiosjvk4tba8n.apps.googleusercontent.com",
+              "client_type": 3
+            },
+            {
+              "client_id": "755660062071-4lo5ajq769v84pspnm1nsi7liihm82of.apps.googleusercontent.com",
+              "client_type": 2,
+              "ios_info": {
+                "bundle_id": "com.example.freeRide"
+              }
+            }
+          ]
+        }
+      }
+    },
+    {
+      "client_info": {
+        "mobilesdk_app_id": "1:755660062071:android:f65a5c987043906cb03572",
+        "android_client_info": {
+          "package_name": "com.example.fastrider_admin"
+        }
+      },
+      "oauth_client": [
+        {
+          "client_id": "755660062071-cgq933vogherffe7ohts77airqlsuja3.apps.googleusercontent.com",
+          "client_type": 1,
+          "android_info": {
+            "package_name": "com.example.fastrider_admin",
+            "certificate_hash": "228342b44d60c781ccdf5337ac1bbfc7d7a6da01"
+          }
+        },
+        {
+          "client_id": "755660062071-us4m34rirnftsm6tu6mjiosjvk4tba8n.apps.googleusercontent.com",
+          "client_type": 3
+        }
+      ],
+      "api_key": [
+        {
+          "current_key": "AIzaSyBQGoJP1neuHbjasEWdFf9Kx4QRKmCv9S4"
+        }
+      ],
+      "services": {
+        "appinvite_service": {
+          "other_platform_oauth_client": [
+            {
+              "client_id": "755660062071-us4m34rirnftsm6tu6mjiosjvk4tba8n.apps.googleusercontent.com",
+              "client_type": 3
+            },
+            {
+              "client_id": "755660062071-4lo5ajq769v84pspnm1nsi7liihm82of.apps.googleusercontent.com",
+              "client_type": 2,
+              "ios_info": {
+                "bundle_id": "com.example.freeRide"
+              }
+            }
+          ]
+        }
+      }
+    },
+    {
+      "client_info": {
+        "mobilesdk_app_id": "1:755660062071:android:c70deda9379d6389b03572",
+        "android_client_info": {
+          "package_name": "com.fastrider.app"
+        }
+      },
+      "oauth_client": [
+        {
+          "client_id": "755660062071-p8q6n3jglbaubeumeo40al25mr7un74h.apps.googleusercontent.com",
+          "client_type": 1,
+          "android_info": {
+            "package_name": "com.fastrider.app",
+            "certificate_hash": "de4db6c3bb22ad8b2a9106f3514135b9a47e627e"
+          }
+        },
+        {
+          "client_id": "755660062071-qr1jct6jp9ls9frb31e3adau2ikoa6qt.apps.googleusercontent.com",
+          "client_type": 1,
+          "android_info": {
+            "package_name": "com.fastrider.app",
+            "certificate_hash": "228342b44d60c781ccdf5337ac1bbfc7d7a6da01"
+          }
+        },
+        {
+          "client_id": "755660062071-us4m34rirnftsm6tu6mjiosjvk4tba8n.apps.googleusercontent.com",
+          "client_type": 3
+        }
+      ],
+      "api_key": [
+        {
+          "current_key": "AIzaSyBQGoJP1neuHbjasEWdFf9Kx4QRKmCv9S4"
+        }
+      ],
+      "services": {
+        "appinvite_service": {
+          "other_platform_oauth_client": [
+            {
+              "client_id": "755660062071-us4m34rirnftsm6tu6mjiosjvk4tba8n.apps.googleusercontent.com",
+              "client_type": 3
+            },
+            {
+              "client_id": "755660062071-4lo5ajq769v84pspnm1nsi7liihm82of.apps.googleusercontent.com",
+              "client_type": 2,
+              "ios_info": {
+                "bundle_id": "com.example.freeRide"
+              }
+            }
+          ]
+        }
+      }
+    }
+  ],
+  "configuration_version": "1"
+}
