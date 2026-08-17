@@ -95,6 +95,7 @@ class NotificationService {
   static StreamSubscription? _firestoreSub;
   static StreamSubscription? _ridesSub;
   static String? _listeningUid;
+  static final Set<String> _shownIds = {}; // dedup across all sources
 
   static Future<String?> getCurrentFcmToken() async {
     try {
@@ -105,7 +106,6 @@ class NotificationService {
   }
 
   static Future<void> init() async {
-
     // create notification channels
     final androidPlugin = _localNotif
         .resolvePlatformSpecificImplementation<
@@ -158,15 +158,16 @@ class NotificationService {
     await flushPendingNotifications();
 
     // listen to auth changes to start/stop Firestore listener
-    bool _authFired = false;
+    bool authFired = false;
     FirebaseAuth.instance.authStateChanges().listen((user) async {
       _firestoreSub?.cancel();
       _ridesSub?.cancel();
       _listeningUid = null;
+      _shownIds.clear();
       if (user != null) {
         if (_listeningUid == user.uid) return;
         _listeningUid = user.uid;
-        _authFired = true;
+        authFired = true;
         await _saveFcmToken(user.uid);
         await _listenFirestore(user.uid);
         _listenRideRequests(user.uid);
@@ -176,9 +177,10 @@ class NotificationService {
     // Fallback: if Firebase auth never fires (session restore failed offline),
     // still save FCM token and start listeners using the cached uid
     Future.delayed(const Duration(seconds: 10), () async {
-      if (_authFired) return;
-      final uid = FirebaseAuth.instance.currentUser?.uid
-          ?? await AuthPersistence.loadUid();
+      if (authFired) return;
+      final uid =
+          FirebaseAuth.instance.currentUser?.uid ??
+          await AuthPersistence.loadUid();
       if (uid == null || uid.isEmpty) return;
       if (_listeningUid == uid) return;
       final token = await getCurrentFcmToken();
@@ -197,7 +199,6 @@ class NotificationService {
         await _saveFcmToken(uid, token: token);
       }
     });
-
   }
 
   static Future<void> flushPendingNotifications() async {
@@ -239,20 +240,29 @@ class NotificationService {
         .where('status', isEqualTo: 'requested')
         .snapshots()
         .listen((snap) async {
-          debugPrint('[RideReq] snapshot docChanges=${snap.docChanges.length} initialLoad=$initialLoad');
+          debugPrint(
+            '[RideReq] snapshot docChanges=${snap.docChanges.length} initialLoad=$initialLoad',
+          );
           if (initialLoad) {
             initialLoad = false;
             return;
           }
           for (final change in snap.docChanges) {
-            debugPrint('[RideReq] change type=${change.type} docId=${change.doc.id}');
+            debugPrint(
+              '[RideReq] change type=${change.type} docId=${change.doc.id}',
+            );
             if (change.type != DocumentChangeType.added) continue;
             final data = change.doc.data();
             if (data == null) continue;
 
+            final docId = change.doc.id;
+            if (_shownIds.contains(docId)) continue;
+            _shownIds.add(docId);
+
             final pickup = data['pickup'] ?? '';
             final destination = data['destination'] ?? '';
-            final passengerName = (data['passengerName'] as String? ?? '').trim();
+            final passengerName = (data['passengerName'] as String? ?? '')
+                .trim();
 
             final title = '🚗 New Ride Request';
             final body =
@@ -313,6 +323,10 @@ class NotificationService {
             const allowedTypes = {'notification', 'ticket_reply'};
             if (type.isNotEmpty && !allowedTypes.contains(type)) continue;
 
+            final docId = change.doc.id;
+            if (_shownIds.contains(docId)) continue;
+            _shownIds.add(docId);
+
             final title = (data['title'] ?? '') as String;
             final body = (data['body'] ?? '') as String;
             await AuthPersistence.savePendingNotification({
@@ -329,5 +343,6 @@ class NotificationService {
   static void dispose() {
     _firestoreSub?.cancel();
     _ridesSub?.cancel();
+    _shownIds.clear();
   }
 }

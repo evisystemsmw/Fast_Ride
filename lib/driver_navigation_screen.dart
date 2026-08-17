@@ -1,8 +1,8 @@
 import 'dart:async';
 import 'dart:convert';
 import 'dart:math' show cos, sin, sqrt, atan2, pi;
-import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
 import 'package:google_maps_flutter/google_maps_flutter.dart';
 import 'package:geolocator/geolocator.dart';
 import 'package:firebase_auth/firebase_auth.dart';
@@ -62,14 +62,25 @@ double _distMBetween(LatLng a, LatLng b) {
 
 class DriverNavigationScreen extends StatefulWidget {
   final VoidCallback? onRideAccepted;
+  final ValueChanged<bool>? onPipChanged;
   final Map<String, dynamic> rideData;
-  const DriverNavigationScreen({super.key, this.onRideAccepted, this.rideData = const {}});
+  const DriverNavigationScreen({
+    super.key,
+    this.onRideAccepted,
+    this.onPipChanged,
+    this.rideData = const {},
+  });
 
   @override
   State<DriverNavigationScreen> createState() => _DriverNavigationScreenState();
 }
 
 class _DriverNavigationScreenState extends State<DriverNavigationScreen> {
+  static const _pipChannel = MethodChannel('com.fastrider.app/pip');
+  static const _pipEvents = EventChannel('com.fastrider.app/pip_events');
+  bool _inPipMode = false;
+  StreamSubscription? _pipSub;
+
   final Completer<GoogleMapController> _mapController = Completer();
 
   Position? _currentPosition;
@@ -147,6 +158,8 @@ class _DriverNavigationScreenState extends State<DriverNavigationScreen> {
 
   // ── Car marker ───────────────────────────────────────────────────────────
   Marker? _carMarker;
+  LatLng? _carAnimFrom;
+  Timer? _carAnimTimer;
 
   @override
   void initState() {
@@ -160,6 +173,8 @@ class _DriverNavigationScreenState extends State<DriverNavigationScreen> {
     _etaTimer?.cancel();
     _routeRefreshTimer?.cancel();
     _distanceSyncTimer?.cancel();
+    _carAnimTimer?.cancel();
+    _pipSub?.cancel();
     _searchController.dispose();
     _passengerNameCtrl.dispose();
     _passengerPhoneCtrl.dispose();
@@ -175,6 +190,7 @@ class _DriverNavigationScreenState extends State<DriverNavigationScreen> {
     await _tts.setLanguage('en-US');
     await _tts.setSpeechRate(0.5);
     await _tts.setVolume(1.0);
+    _listenPipMode();
     _listenActiveRide();
     _loadFareConfig();
     final position = await MapService.getCurrentPosition();
@@ -192,6 +208,19 @@ class _DriverNavigationScreenState extends State<DriverNavigationScreen> {
         _drawRouteForPhase(position);
       }
     }
+  }
+
+  void _setPip(bool enabled) {
+    _pipChannel.invokeMethod(enabled ? 'enablePip' : 'disablePip').catchError((_) {});
+  }
+
+  void _listenPipMode() {
+    _pipSub = _pipEvents.receiveBroadcastStream().listen((value) {
+      if (mounted) {
+        setState(() => _inPipMode = value as bool);
+        widget.onPipChanged?.call(value as bool);
+      }
+    });
   }
 
   void _drawRouteForPhase(Position position) {
@@ -280,7 +309,7 @@ class _DriverNavigationScreenState extends State<DriverNavigationScreen> {
       // position here is already Kalman-smoothed by trackLocation()
       // we need the original raw coords — use the smoothed as proxy but
       // track separately so snap path uses consistent last-raw baseline
-      
+
       // ── Arrival auto-detection ────────────────────────────────────────────
       if (_tripPhase == 'en_route' &&
           !_arrivedAtPickup &&
@@ -297,11 +326,12 @@ class _DriverNavigationScreenState extends State<DriverNavigationScreen> {
             await db.collection('rides').doc(_activeRideId).update({
               'tripPhase': 'arrived',
             });
-            if (mounted)
+            if (mounted) {
               setState(() {
                 _tripPhase = 'arrived';
                 _cardMinimized = false;
               });
+            }
           }
         }
       }
@@ -316,11 +346,12 @@ class _DriverNavigationScreenState extends State<DriverNavigationScreen> {
           if (distToDest <= 50) {
             _arrivedAtDest = true;
             _speak('You have arrived at the destination.');
-            if (mounted)
+            if (mounted) {
               setState(() {
                 _showDestArrivalBanner = true;
                 _cardMinimized = false;
               });
+            }
           }
         }
       }
@@ -335,8 +366,9 @@ class _DriverNavigationScreenState extends State<DriverNavigationScreen> {
               '[OFFROAD] on-route snap.distM=${snap.distM.toStringAsFixed(1)}m',
             );
           } catch (_) {}
-          if (_showOffRoadWarning && mounted)
+          if (_showOffRoadWarning && mounted) {
             setState(() => _showOffRoadWarning = false);
+          }
         } else if (snap.distM > _offRoadThresholdM) {
           try {
             debugPrint(
@@ -363,15 +395,16 @@ class _DriverNavigationScreenState extends State<DriverNavigationScreen> {
           snapped = polySnap.distM <= 80 ? polySnap.snapped : rawLatLng;
         } else {
           // Outside in_trip: use Roads API (nearest road is fine)
-          final skipSnap = _lastRawLatLng != null &&
+          final skipSnap =
+              _lastRawLatLng != null &&
               MapService.distanceKm(
-                    _lastRawLatLng!.latitude,
-                    _lastRawLatLng!.longitude,
-                    rawLatLng.latitude,
-                    rawLatLng.longitude,
-                  ) *
-                  1000 <
-              3.0;
+                        _lastRawLatLng!.latitude,
+                        _lastRawLatLng!.longitude,
+                        rawLatLng.latitude,
+                        rawLatLng.longitude,
+                      ) *
+                      1000 <
+                  3.0;
           if (skipSnap) {
             snapped = _lastDriverLatLng ?? rawLatLng;
           } else if (_lastRawLatLng != null) {
@@ -394,23 +427,17 @@ class _DriverNavigationScreenState extends State<DriverNavigationScreen> {
       }
       final carIcon = await MapService.carMarker(heading);
       if (!mounted) return;
-      final newCarMarker = Marker(
-        markerId: const MarkerId('car'),
-        position: snapped,
-        icon: carIcon,
-        flat: true,
-        anchor: const Offset(0.5, 0.5),
-        zIndex: 3,
-      );
 
       setState(() {
         _currentPosition = position;
         _currentSpeedKmh = (rawPosition.speed * 3.6).clamp(0, 300);
         _currentHeading = heading;
-        _lastDriverLatLng = snapped;
         _lastRawLatLng = rawLatLng;
-        _carMarker = newCarMarker;
       });
+
+      // Smoothly animate car marker from last position to new snapped position
+      _animateCarMarker(snapped, carIcon);
+      _lastDriverLatLng = snapped;
       await MapService.updateDriverLocation(
         rawPosition,
         minDistanceMeters: _tripPhase == 'in_trip' ? 2 : 5,
@@ -506,8 +533,8 @@ class _DriverNavigationScreenState extends State<DriverNavigationScreen> {
             CameraUpdate.newCameraPosition(
               CameraPosition(
                 target: cameraTarget,
-                zoom: _isNavigating ? 17.5 : 16.0,
-                tilt: _isNavigating ? 60 : 0,
+                zoom: _inPipMode ? 18.5 : (_isNavigating ? 17.5 : 16.0),
+                tilt: _inPipMode ? 0 : (_isNavigating ? 60 : 0),
                 bearing: _isNavigating ? heading : 0,
               ),
             ),
@@ -560,7 +587,9 @@ class _DriverNavigationScreenState extends State<DriverNavigationScreen> {
         }
 
         // reroute if off-route: snap distance > 80m and moving
-        if (_lastGoodPolyline.isNotEmpty && _currentSpeedKmh > 5 && !_routeDrawing) {
+        if (_lastGoodPolyline.isNotEmpty &&
+            _currentSpeedKmh > 5 &&
+            !_routeDrawing) {
           final snapDist = _snapToPolyline(snapped, _lastGoodPolyline).distM;
           if (snapDist > 80) {
             _drawRouteForPhase(position);
@@ -573,6 +602,53 @@ class _DriverNavigationScreenState extends State<DriverNavigationScreen> {
         // steps not loaded yet — redraw route
         _drawRouteForPhase(position);
       }
+    });
+  }
+
+  /// Lerps the car marker from its current position to [target] over 300 ms.
+  /// Only runs during in_trip to keep things smooth; instant elsewhere.
+  void _animateCarMarker(LatLng target, BitmapDescriptor icon) {
+    _carAnimTimer?.cancel();
+    final from = _carAnimFrom ?? target;
+    _carAnimFrom = target;
+
+    // Skip animation if distance is negligible (< 1 m) to avoid jitter
+    if (_distMBetween(from, target) < 1.0) {
+      if (mounted) {
+        setState(() {
+          _carMarker = Marker(
+            markerId: const MarkerId('car'),
+            position: target,
+            icon: icon,
+            flat: true,
+            anchor: const Offset(0.5, 0.5),
+            zIndex: 3,
+          );
+        });
+      }
+      return;
+    }
+
+    const steps = 20;
+    const stepMs = 15; // 20 steps * 15 ms = 300 ms total
+    int step = 0;
+    _carAnimTimer = Timer.periodic(const Duration(milliseconds: stepMs), (t) {
+      if (!mounted) { t.cancel(); return; }
+      step++;
+      final frac = step / steps;
+      final lat = from.latitude + (target.latitude - from.latitude) * frac;
+      final lng = from.longitude + (target.longitude - from.longitude) * frac;
+      setState(() {
+        _carMarker = Marker(
+          markerId: const MarkerId('car'),
+          position: LatLng(lat, lng),
+          icon: icon,
+          flat: true,
+          anchor: const Offset(0.5, 0.5),
+          zIndex: 3,
+        );
+      });
+      if (step >= steps) t.cancel();
     });
   }
 
@@ -826,8 +902,9 @@ class _DriverNavigationScreenState extends State<DriverNavigationScreen> {
     _routeRefreshTimer?.cancel();
     // every 90 s during in_trip, refresh route if polyline is empty
     _routeRefreshTimer = Timer.periodic(const Duration(seconds: 90), (_) {
-      if (!mounted || _tripPhase != 'in_trip' || _currentPosition == null)
+      if (!mounted || _tripPhase != 'in_trip' || _currentPosition == null) {
         return;
+      }
       if (_polylines.isEmpty || _steps.isEmpty) {
         _drawRouteForPhase(_currentPosition!);
       }
@@ -978,9 +1055,7 @@ class _DriverNavigationScreenState extends State<DriverNavigationScreen> {
       _steps = [];
       _stepIndex = 0;
       _lastGoodPolyline = [];
-      _markers = _markers
-          .where((m) => m.markerId.value != 'search')
-          .toSet();
+      _markers = _markers.where((m) => m.markerId.value != 'search').toSet();
     });
   }
 
@@ -1347,6 +1422,7 @@ class _DriverNavigationScreenState extends State<DriverNavigationScreen> {
     _etaTimer?.cancel();
     _routeRefreshTimer?.cancel();
     _distanceSyncTimer?.cancel();
+    _setPip(false);
     _startTracking(); // back to normal 5m filter
     // allow device to sleep again
     try {
@@ -1528,7 +1604,7 @@ class _DriverNavigationScreenState extends State<DriverNavigationScreen> {
             SizedBox(
               width: double.infinity,
               child: ElevatedButton.icon(
-                onPressed: () => Navigator.pop(context),
+                onPressed: () { _setPip(false); Navigator.pop(context); },
                 style: ElevatedButton.styleFrom(
                   backgroundColor: Colors.green,
                   foregroundColor: Colors.white,
@@ -1707,7 +1783,8 @@ class _DriverNavigationScreenState extends State<DriverNavigationScreen> {
             padding: EdgeInsets.zero,
           ),
           // ── Google Maps-style instruction banner ─────────────────────────────
-          if (!_selfNavigating)
+          // In PiP mode: show nothing — pure map centred on car
+          if (!_selfNavigating && !_inPipMode)
             Positioned(
               top: 0,
               left: 0,
@@ -1717,6 +1794,8 @@ class _DriverNavigationScreenState extends State<DriverNavigationScreen> {
                 child: Column(
                   mainAxisSize: MainAxisSize.min,
                   children: [
+                    // Normal mode: full banner
+                    if (!_inPipMode) ...[
                     // turn instruction
                     if (_isNavigating && _nextInstruction.isNotEmpty)
                       Container(
@@ -1891,81 +1970,51 @@ class _DriverNavigationScreenState extends State<DriverNavigationScreen> {
                         child: Row(
                           mainAxisAlignment: MainAxisAlignment.spaceBetween,
                           children: [
-                            _StripStat(
+                            Flexible(child: _StripStat(
                               label: 'ETA',
                               value: _etaSeconds >= 3600
                                   ? '${_etaSeconds ~/ 3600}h ${(_etaSeconds % 3600) ~/ 60}m'
                                   : '${_etaSeconds ~/ 60} min',
                               color: _navy,
-                            ),
-                            Container(
-                              width: 1,
-                              height: 28,
-                              color: Colors.grey.shade200,
-                            ),
-                            _StripStat(
+                            )),
+                            Container(width: 1, height: 28, color: Colors.grey.shade200),
+                            Flexible(child: _StripStat(
                               label: 'Remaining',
                               value: _distanceKm >= 1
                                   ? '${_distanceKm.toStringAsFixed(1)} km'
                                   : '${(_distanceKm * 1000).toStringAsFixed(0)} m',
                               color: _navy,
-                            ),
-                            Container(
-                              width: 1,
-                              height: 28,
-                              color: Colors.grey.shade200,
-                            ),
-                            _StripStat(
+                            )),
+                            Container(width: 1, height: 28, color: Colors.grey.shade200),
+                            Flexible(child: _StripStat(
                               label: 'Speed',
-                              value:
-                                  '${_currentSpeedKmh.toStringAsFixed(0)} km/h',
+                              value: '${_currentSpeedKmh.toStringAsFixed(0)} km/h',
                               color: _currentSpeedKmh > 80 ? Colors.red : _navy,
-                            ),
-                            // approaching destination chip
-                            if (_tripPhase == 'in_trip' &&
-                                _distanceKm > 0 &&
-                                _distanceKm < 0.5) ...[
-                              Container(
-                                width: 1,
-                                height: 28,
-                                color: Colors.grey.shade200,
-                              ),
-                              _StripStat(
+                            )),
+                            if (_tripPhase == 'in_trip' && _distanceKm > 0 && _distanceKm < 0.5) ...[
+                              Container(width: 1, height: 28, color: Colors.grey.shade200),
+                              Flexible(child: _StripStat(
                                 label: 'Arriving',
-                                value: _etaSeconds < 60
-                                    ? '<1 min'
-                                    : '${_etaSeconds ~/ 60} min',
+                                value: _etaSeconds < 60 ? '<1 min' : '${_etaSeconds ~/ 60} min',
                                 color: Colors.green,
-                              ),
+                              )),
                             ],
                             GestureDetector(
                               onTap: _showSearchSheet,
                               child: Container(
-                                padding: const EdgeInsets.symmetric(
-                                  horizontal: 10,
-                                  vertical: 6,
-                                ),
+                                padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 6),
                                 decoration: BoxDecoration(
                                   color: _navy.withValues(alpha: 0.08),
                                   borderRadius: BorderRadius.circular(10),
                                 ),
-                                child: const Icon(
-                                  Icons.search_rounded,
-                                  color: _navy,
-                                  size: 18,
-                                ),
+                                child: const Icon(Icons.search_rounded, color: _navy, size: 18),
                               ),
                             ),
                             const SizedBox(width: 6),
                             GestureDetector(
-                              onTap: () => setState(
-                                () => _voiceEnabled = !_voiceEnabled,
-                              ),
+                              onTap: () => setState(() => _voiceEnabled = !_voiceEnabled),
                               child: Container(
-                                padding: const EdgeInsets.symmetric(
-                                  horizontal: 10,
-                                  vertical: 6,
-                                ),
+                                padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 6),
                                 decoration: BoxDecoration(
                                   color: _voiceEnabled
                                       ? Colors.green.withValues(alpha: 0.12)
@@ -1973,12 +2022,8 @@ class _DriverNavigationScreenState extends State<DriverNavigationScreen> {
                                   borderRadius: BorderRadius.circular(10),
                                 ),
                                 child: Icon(
-                                  _voiceEnabled
-                                      ? Icons.volume_up_rounded
-                                      : Icons.volume_off_rounded,
-                                  color: _voiceEnabled
-                                      ? Colors.green
-                                      : _navy.withValues(alpha: 0.4),
+                                  _voiceEnabled ? Icons.volume_up_rounded : Icons.volume_off_rounded,
+                                  color: _voiceEnabled ? Colors.green : _navy.withValues(alpha: 0.4),
                                   size: 18,
                                 ),
                               ),
@@ -1987,7 +2032,7 @@ class _DriverNavigationScreenState extends State<DriverNavigationScreen> {
                         ),
                       ),
                     // idle (no active nav)
-                    if (!_isNavigating)
+                    if (!_inPipMode && !_isNavigating)
                       Container(
                         margin: const EdgeInsets.fromLTRB(12, 8, 12, 0),
                         padding: const EdgeInsets.symmetric(
@@ -2086,12 +2131,13 @@ class _DriverNavigationScreenState extends State<DriverNavigationScreen> {
                           ],
                         ),
                       ),
+                    ], // end !_inPipMode
                   ],
                 ),
               ),
             ),
           // recenter button (always visible during navigation)
-          if (_isNavigating)
+          if (!_inPipMode && _isNavigating)
             Positioned(
               bottom: 220,
               right: 16,
@@ -2138,7 +2184,7 @@ class _DriverNavigationScreenState extends State<DriverNavigationScreen> {
               ),
             ),
           // Self travel bottom card
-          if (_selfNavigating)
+          if (!_inPipMode && _selfNavigating)
             Positioned(
               bottom: 100,
               left: 16,
@@ -2250,7 +2296,7 @@ class _DriverNavigationScreenState extends State<DriverNavigationScreen> {
               ),
             ),
           // Book for customer — passenger details form
-          if (_bookingForCustomer)
+          if (!_inPipMode && _bookingForCustomer)
             Positioned(
               bottom: 100,
               left: 16,
@@ -2452,7 +2498,7 @@ class _DriverNavigationScreenState extends State<DriverNavigationScreen> {
               ),
             ),
           // Pending ride request card
-          if (_pendingRide != null && _activeRide == null)
+          if (!_inPipMode && _pendingRide != null && _activeRide == null)
             Positioned(
               bottom: 100,
               left: 16,
@@ -2598,7 +2644,7 @@ class _DriverNavigationScreenState extends State<DriverNavigationScreen> {
               ),
             ),
           // Active ride card — en_route phase
-          if (_activeRide != null && _tripPhase == 'en_route')
+          if (!_inPipMode && _activeRide != null && _tripPhase == 'en_route')
             Positioned(
               bottom: 100,
               right: 16,
@@ -2778,7 +2824,7 @@ class _DriverNavigationScreenState extends State<DriverNavigationScreen> {
             ),
 
           // arrived phase card
-          if (_activeRide != null && _tripPhase == 'arrived')
+          if (!_inPipMode && _activeRide != null && _tripPhase == 'arrived')
             Positioned(
               bottom: 100,
               left: 16,
@@ -2944,6 +2990,7 @@ class _DriverNavigationScreenState extends State<DriverNavigationScreen> {
                             debugPrint('[Wakelock] enabled (trip started)');
                           } catch (_) {}
                           _speak('Trip started. Navigating to destination.');
+                          _setPip(true);
                           _startTracking(continuous: true);
                           await db
                               .collection('rides')
@@ -2997,7 +3044,7 @@ class _DriverNavigationScreenState extends State<DriverNavigationScreen> {
             ),
 
           // in_trip phase card
-          if (_activeRide != null && _tripPhase == 'in_trip')
+          if (!_inPipMode && _activeRide != null && _tripPhase == 'in_trip')
             Positioned(
               bottom: 100,
               right: 16,
@@ -3066,49 +3113,31 @@ class _DriverNavigationScreenState extends State<DriverNavigationScreen> {
                                   color: Colors.green.withValues(alpha: 0.1),
                                   shape: BoxShape.circle,
                                 ),
-                                child: const Icon(
-                                  Icons.navigation_rounded,
-                                  color: Colors.green,
-                                  size: 18,
-                                ),
+                                child: const Icon(Icons.navigation_rounded, color: Colors.green, size: 18),
                               ),
                               const SizedBox(width: 10),
-                              const Text(
-                                'Trip in Progress',
-                                style: TextStyle(
-                                  color: _navy,
-                                  fontWeight: FontWeight.bold,
-                                  fontSize: 15,
+                              const Expanded(
+                                child: Text(
+                                  'Trip in Progress',
+                                  style: TextStyle(color: _navy, fontWeight: FontWeight.bold, fontSize: 15),
+                                  overflow: TextOverflow.ellipsis,
                                 ),
                               ),
-                              const Spacer(),
                               Container(
-                                padding: const EdgeInsets.symmetric(
-                                  horizontal: 10,
-                                  vertical: 4,
-                                ),
+                                padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 4),
                                 decoration: BoxDecoration(
                                   color: Colors.green.withValues(alpha: 0.1),
                                   borderRadius: BorderRadius.circular(20),
                                 ),
                                 child: const Text(
                                   'On Trip',
-                                  style: TextStyle(
-                                    color: Colors.green,
-                                    fontSize: 11,
-                                    fontWeight: FontWeight.w600,
-                                  ),
+                                  style: TextStyle(color: Colors.green, fontSize: 11, fontWeight: FontWeight.w600),
                                 ),
                               ),
                               const SizedBox(width: 8),
                               GestureDetector(
-                                onTap: () =>
-                                    setState(() => _cardMinimized = true),
-                                child: const Icon(
-                                  Icons.keyboard_arrow_down_rounded,
-                                  color: _navy,
-                                  size: 22,
-                                ),
+                                onTap: () => setState(() => _cardMinimized = true),
+                                child: const Icon(Icons.keyboard_arrow_down_rounded, color: _navy, size: 22),
                               ),
                             ],
                           ),
@@ -3147,36 +3176,25 @@ class _DriverNavigationScreenState extends State<DriverNavigationScreen> {
                             ),
                             child: Row(
                               children: [
-                                const Icon(
-                                  Icons.payments_rounded,
-                                  color: Colors.green,
-                                  size: 16,
+                                const Icon(Icons.payments_rounded, color: Colors.green, size: 16),
+                                const SizedBox(width: 8),
+                                Flexible(
+                                  child: Text(
+                                    _tripDistanceKm <= _shortDistanceThresholdKm
+                                        ? 'MWK ${_shortDistanceFee.toStringAsFixed(0)} (flat)'
+                                        : 'MWK ${(_baseFee + _tripDistanceKm * _pricePerKm).toStringAsFixed(0)}',
+                                    style: const TextStyle(
+                                      color: Colors.green,
+                                      fontWeight: FontWeight.bold,
+                                      fontSize: 15,
+                                    ),
+                                    overflow: TextOverflow.ellipsis,
+                                  ),
                                 ),
                                 const SizedBox(width: 8),
                                 Text(
-                                  'Live Fare: ',
-                                  style: TextStyle(
-                                    color: _navy.withValues(alpha: 0.6),
-                                    fontSize: 12,
-                                  ),
-                                ),
-                                Text(
-                                  _tripDistanceKm <= _shortDistanceThresholdKm
-                                      ? 'MWK ${_shortDistanceFee.toStringAsFixed(0)} (flat)'
-                                      : 'MWK ${(_baseFee + _tripDistanceKm * _pricePerKm).toStringAsFixed(0)}',
-                                  style: const TextStyle(
-                                    color: Colors.green,
-                                    fontWeight: FontWeight.bold,
-                                    fontSize: 15,
-                                  ),
-                                ),
-                                const Spacer(),
-                                Text(
                                   '${_tripDistanceKm.toStringAsFixed(2)} km',
-                                  style: TextStyle(
-                                    color: _navy.withValues(alpha: 0.5),
-                                    fontSize: 11,
-                                  ),
+                                  style: TextStyle(color: _navy.withValues(alpha: 0.5), fontSize: 11),
                                 ),
                               ],
                             ),
@@ -3260,8 +3278,9 @@ class _DriverNavigationScreenState extends State<DriverNavigationScreen> {
                                       }
 
                                       _resetTripState();
-                                      if (mounted)
+                                      if (mounted) {
                                         setState(() => _completing = false);
+                                      }
                                       _speak(
                                         'Trip completed. Please collect payment.',
                                       );

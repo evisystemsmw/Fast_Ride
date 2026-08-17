@@ -476,6 +476,25 @@ class _BookingDetailScreenState extends State<BookingDetailScreen> {
                         child: ElevatedButton.icon(
                           onPressed: () async {
                             final uid = FirebaseAuth.instance.currentUser!.uid;
+                            // Block if driver already has an active ride
+                            final busy = await db
+                                .collection('rides')
+                                .where('driverId', isEqualTo: uid)
+                                .where('status', whereIn: ['accepted', 'in_trip'])
+                                .limit(1)
+                                .get();
+                            if (busy.docs.isNotEmpty) {
+                              if (context.mounted) {
+                                ScaffoldMessenger.of(context).showSnackBar(
+                                  const SnackBar(
+                                    content: Text('Finish your current ride before accepting a new one.'),
+                                    backgroundColor: _red,
+                                    behavior: SnackBarBehavior.floating,
+                                  ),
+                                );
+                              }
+                              return;
+                            }
                             final driverDoc = await db.collection('drivers').doc(uid).get();
                             final dd = driverDoc.data() ?? {};
                             await db.collection('rides').doc(widget.rideId).update({

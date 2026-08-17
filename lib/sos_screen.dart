@@ -88,11 +88,12 @@ class _SosScreenState extends State<SosScreen> {
       'isSystem': true,
     });
 
-    if (mounted)
+    if (mounted) {
       setState(() {
         _sosId = doc.id;
         _creating = false;
       });
+    }
   }
 
   Future<void> _sendMessage() async {
@@ -175,18 +176,20 @@ class _SosScreenState extends State<SosScreen> {
         'distressSentAt': FieldValue.serverTimestamp(),
         if (locationData.isNotEmpty) 'location': locationData,
       });
-      if (mounted)
+      if (mounted) {
         setState(() {
           _distressSent = true;
           _distressSending = false;
         });
+      }
       _scrollToBottom();
     } catch (_) {
-      if (mounted)
+      if (mounted) {
         setState(() {
           _distressSending = false;
           _holdProgress = 0;
         });
+      }
     }
   }
 

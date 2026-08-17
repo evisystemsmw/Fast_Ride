@@ -56,7 +56,12 @@ class _NotificationsScreenState extends State<NotificationsScreen> {
           final bt = (b['createdAt'] as Timestamp?)?.toDate() ?? DateTime(0);
           return bt.compareTo(at);
         });
-      if (mounted) setState(() { _docs = sorted; _loading = false; });
+      if (mounted) {
+        setState(() {
+          _docs = sorted;
+          _loading = false;
+        });
+      }
     }
 
     final userDoc = await db.collection('users').doc(uid).get();
@@ -86,7 +91,9 @@ class _NotificationsScreenState extends State<NotificationsScreen> {
             }
             merge();
           },
-          onError: (e) { if (mounted) setState(() => _loading = false); },
+          onError: (e) {
+            if (mounted) setState(() => _loading = false);
+          },
         );
 
     _userIdSub = db
@@ -105,7 +112,9 @@ class _NotificationsScreenState extends State<NotificationsScreen> {
             }
             merge();
           },
-          onError: (e) { if (mounted) setState(() => _loading = false); },
+          onError: (e) {
+            if (mounted) setState(() => _loading = false);
+          },
         );
 
     _broadcastSub = db
@@ -124,7 +133,9 @@ class _NotificationsScreenState extends State<NotificationsScreen> {
             }
             merge();
           },
-          onError: (e) { if (mounted) setState(() => _loading = false); },
+          onError: (e) {
+            if (mounted) setState(() => _loading = false);
+          },
         );
   }
 
@@ -157,11 +168,17 @@ class _NotificationsScreenState extends State<NotificationsScreen> {
           icon: const Icon(Icons.arrow_back_ios, color: _navy),
           onPressed: () => Navigator.pop(context),
         ),
-        title: const Text('Notifications', style: TextStyle(color: _navy, fontWeight: FontWeight.bold)),
+        title: const Text(
+          'Notifications',
+          style: TextStyle(color: _navy, fontWeight: FontWeight.bold),
+        ),
         actions: [
           TextButton(
             onPressed: () => _markAllRead(uid),
-            child: const Text('Mark all read', style: TextStyle(color: _red, fontSize: 13)),
+            child: const Text(
+              'Mark all read',
+              style: TextStyle(color: _red, fontSize: 13),
+            ),
           ),
         ],
       ),
@@ -172,16 +189,26 @@ class _NotificationsScreenState extends State<NotificationsScreen> {
               child: Column(
                 mainAxisSize: MainAxisSize.min,
                 children: [
-                  Icon(Icons.notifications_off_outlined, size: 56, color: _navy.withOpacity(0.2)),
+                  Icon(
+                    Icons.notifications_off_outlined,
+                    size: 56,
+                    color: _navy.withOpacity(0.2),
+                  ),
                   const SizedBox(height: 12),
-                  Text('No notifications yet', style: TextStyle(color: _navy.withOpacity(0.4), fontSize: 15)),
+                  Text(
+                    'No notifications yet',
+                    style: TextStyle(
+                      color: _navy.withOpacity(0.4),
+                      fontSize: 15,
+                    ),
+                  ),
                 ],
               ),
             )
           : ListView.separated(
               padding: const EdgeInsets.symmetric(horizontal: 24, vertical: 8),
               itemCount: _docs.length,
-              separatorBuilder: (_, __) => const SizedBox(height: 10),
+              separatorBuilder: (_, _) => const SizedBox(height: 10),
               itemBuilder: (context, i) {
                 final doc = _docs[i];
                 final d = doc.data() as Map<String, dynamic>;
@@ -223,7 +250,9 @@ class _NotifTileState extends State<_NotifTile> {
     return GestureDetector(
       onTap: () {
         setState(() => _expanded = !_expanded);
-        if (!isRead) widget.doc.reference.update({'isRead': true, 'read': true});
+        if (!isRead) {
+          widget.doc.reference.update({'isRead': true, 'read': true});
+        }
       },
       child: Container(
         padding: const EdgeInsets.all(16),
@@ -265,18 +294,34 @@ class _NotifTileState extends State<_NotifTile> {
                     Text(
                       body,
                       maxLines: _expanded ? null : 2,
-                      overflow: _expanded ? TextOverflow.visible : TextOverflow.ellipsis,
-                      style: TextStyle(color: _navy.withOpacity(0.6), fontSize: 13, height: 1.4),
+                      overflow: _expanded
+                          ? TextOverflow.visible
+                          : TextOverflow.ellipsis,
+                      style: TextStyle(
+                        color: _navy.withOpacity(0.6),
+                        fontSize: 13,
+                        height: 1.4,
+                      ),
                     ),
                     const SizedBox(height: 4),
                     Text(
                       _expanded ? 'Show less' : 'Read more',
-                      style: const TextStyle(color: _red, fontSize: 12, fontWeight: FontWeight.w600),
+                      style: const TextStyle(
+                        color: _red,
+                        fontSize: 12,
+                        fontWeight: FontWeight.w600,
+                      ),
                     ),
                   ],
                   if (ts != null) ...[
                     const SizedBox(height: 6),
-                    Text(_timeAgo(ts), style: TextStyle(color: _navy.withOpacity(0.35), fontSize: 11)),
+                    Text(
+                      _timeAgo(ts),
+                      style: TextStyle(
+                        color: _navy.withOpacity(0.35),
+                        fontSize: 11,
+                      ),
+                    ),
                   ],
                 ],
               ),
@@ -286,7 +331,10 @@ class _NotifTileState extends State<_NotifTile> {
                 width: 8,
                 height: 8,
                 margin: const EdgeInsets.only(top: 4),
-                decoration: const BoxDecoration(color: _red, shape: BoxShape.circle),
+                decoration: const BoxDecoration(
+                  color: _red,
+                  shape: BoxShape.circle,
+                ),
               ),
           ],
         ),

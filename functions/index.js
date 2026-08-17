@@ -35,7 +35,74 @@ async function sendPush(uid, title, body) {
   }
 }
 
-// ── New ride request → ring driver even when app is closed ───────────────────
+// ── Admin broadcast/personal notification → send FCM push ───────────────────
+exports.onNotificationCreated = onDocumentCreated(
+  'notifications/{notifId}',
+  async (event) => {
+    const db = getFirestore();
+    const data = event.data?.data();
+    if (!data) return;
+
+    const title = data.title || '';
+    const body = data.body || '';
+    if (!title && !body) return;
+
+    const type = (data.type || '').toLowerCase().trim();
+    if (type === 'ride_request') return;
+    if (type && type !== 'notification' && type !== 'ticket_reply') return;
+
+    // Personal notification — send to specific uid
+    const uid = data.uid || data.userId;
+    if (uid) {
+      await sendPush(uid, title, body);
+      return;
+    }
+
+    // Broadcast notification — send to all matching role users
+    const target = (data.target || '').toLowerCase().trim();
+    if (!target) return;
+
+    const isAll = target === 'all';
+    const isDrivers = target === 'drivers' || target === 'driver';
+    const isPassengers = target === 'passengers' || target === 'passenger';
+    const isStaff = target === 'staff';
+
+    if (isAll || isDrivers) {
+      const snap = await db.collection('drivers').get();
+      await Promise.all(snap.docs.map(doc => {
+        const token = doc.data().fcmToken;
+        if (!token) return Promise.resolve();
+        return getMessaging().send({
+          token,
+          notification: { title, body },
+          data: { title, body },
+          android: { priority: 'high' },
+        }).catch(e => console.warn(`[broadcast] driver ${doc.id}: ${e.message}`));
+      }));
+    }
+
+    if (isAll || isPassengers || isStaff) {
+      const roleFilter = isAll ? null : (isPassengers ? 'passenger' : 'staff');
+      let query = db.collection('users');
+      if (roleFilter) query = query.where('role', '==', roleFilter);
+      const snap = await query.get();
+      await Promise.all(snap.docs.map(doc => {
+        const token = doc.data().fcmToken;
+        if (!token) return Promise.resolve();
+        return getMessaging().send({
+          token,
+          notification: { title, body },
+          data: { title, body },
+          android: { priority: 'high' },
+        }).catch(e => console.warn(`[broadcast] user ${doc.id}: ${e.message}`));
+      }));
+    }
+
+    console.log(`[onNotificationCreated] broadcast done target=${target}`);
+  }
+);
+
+
 exports.onRideRequestCreated = onDocumentCreated(
   'rides/{rideId}',
   async (event) => {
@@ -196,6 +263,25 @@ exports.scheduledRideReminder = onSchedule('every 5 minutes', async () => {
         `Head to pickup now — ${ride.passengerName || 'passenger'} at ${ride.pickup || 'pickup location'} at ${timeStr}.`,
         'reminder10Sent',
       );
+    }
+
+    // Auto-start: flip to 'requested' when scheduledAt - 10 min has passed
+    const t = scheduledAt?.toDate?.()?.getTime();
+    if (t && now.getTime() >= t - 10 * 60000) {
+      // Skip if driver is already on an active ride
+      if (ride.driverId) {
+        const busySnap = await db.collection('rides')
+          .where('driverId', '==', ride.driverId)
+          .where('status', 'in', ['accepted', 'in_trip'])
+          .limit(1)
+          .get();
+        if (!busySnap.empty) {
+          console.log(`[scheduledRideReminder] skipped auto-start for ride ${doc.id} — driver ${ride.driverId} is busy`);
+          continue;
+        }
+      }
+      await doc.ref.update({ status: 'requested' });
+      console.log(`[scheduledRideReminder] auto-started ride ${doc.id}`);
     }
   }
 });

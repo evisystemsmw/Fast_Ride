@@ -51,6 +51,12 @@ class _AvailableDriversScreenState extends State<AvailableDriversScreen>
   bool _booking = false;
   late AnimationController _pulseCtrl;
 
+  double? _estimatedFare;
+
+  Set<String> _busyDriverIds = {};
+  StreamSubscription? _busySub;
+  List<QueryDocumentSnapshot<Map<String, dynamic>>> _lastDriverDocs = [];
+
   @override
   void initState() {
     super.initState();
@@ -58,23 +64,44 @@ class _AvailableDriversScreenState extends State<AvailableDriversScreen>
       vsync: this,
       duration: const Duration(milliseconds: 900),
     )..repeat(reverse: true);
-    // Start listening to drivers immediately — restart with geo filter once pickup resolves
+    _startBusyStream();
     _startDriverStream();
     _resolvePickup();
+    _fetchEstimatedFare().then((f) { if (mounted) setState(() => _estimatedFare = f); });
   }
 
   @override
   void dispose() {
     _driverSub?.cancel();
+    _busySub?.cancel();
     _mapCtrl?.dispose();
     _pulseCtrl.dispose();
     // Cancel the ride if passenger backed out without booking a driver
     db.collection('rides').doc(widget.rideId).get().then((doc) {
-      if (doc.exists && doc.data()?['status'] == 'pending') {
+      if (!doc.exists) return;
+      final data = doc.data()!;
+      final status = data['status'] as String? ?? '';
+      final hasDriver = data['driverId'] != null;
+      if ((status == 'pending' || status == 'scheduled') && !hasDriver) {
         doc.reference.delete();
       }
     });
     super.dispose();
+  }
+
+  void _startBusyStream() {
+    _busySub = db
+        .collection('rides')
+        .where('status', whereIn: ['accepted', 'in_trip'])
+        .snapshots()
+        .listen((snap) {
+      final ids = snap.docs
+          .map((d) => d.data()['driverId'] as String?)
+          .whereType<String>()
+          .toSet();
+      _busyDriverIds = ids;
+      if (_lastDriverDocs.isNotEmpty) _rebuildDriverList(_lastDriverDocs);
+    });
   }
 
   /// Stream only drivers within ~15 km of pickup using a lat/lng bounding box
@@ -84,24 +111,21 @@ class _AvailableDriversScreenState extends State<AvailableDriversScreen>
     final lng = _pickupLatLng?.longitude;
     const double delta = 0.135; // ~15 km in degrees
 
-    Query<Map<String, dynamic>> query = db
-        .collection('drivers')
-        .where('isOnline', isEqualTo: true);
-
-    if (lat != null && lng != null) {
-      query = query
-          .where('lat', isGreaterThanOrEqualTo: lat - delta)
-          .where('lat', isLessThanOrEqualTo: lat + delta);
-    }
+    // No range filter server-side to avoid composite index requirement.
+    // Filter isOnline + location client-side.
+    final query = db.collection('drivers');
 
     _driverSub = query.snapshots().listen((snap) {
-      // client-side filter on lng since Firestore only allows one range field
-      final filtered = lat == null || lng == null
-          ? snap.docs
-          : snap.docs.where((d) {
-              final dLng = (d.data()['lng'] as num?)?.toDouble();
-              return dLng != null && (dLng - lng).abs() <= delta;
-            }).toList();
+      final filtered = snap.docs.where((d) {
+        final data = d.data();
+        if (data['isOnline'] != true) return false;
+        if (lat == null || lng == null) return true;
+        final dLat = (data['lat'] as num?)?.toDouble();
+        final dLng = (data['lng'] as num?)?.toDouble();
+        if (dLat == null || dLng == null) return false;
+        return (dLat - lat).abs() <= delta && (dLng - lng).abs() <= delta;
+      }).toList();
+      _lastDriverDocs = filtered;
       _rebuildDriverList(filtered);
     });
   }
@@ -115,7 +139,7 @@ class _AvailableDriversScreenState extends State<AvailableDriversScreen>
     for (final doc in docs) {
       final data = doc.data();
       final status = (data['status'] as String?)?.toLowerCase();
-      if (status == 'pending' || status == 'suspended') continue;
+      if (status == 'pending' || status == 'suspended' || status == 'blocked') continue;
       final gp = data['location'] as GeoPoint?;
       final lat = gp?.latitude ?? (data['lat'] as num?)?.toDouble();
       final lng = gp?.longitude ?? (data['lng'] as num?)?.toDouble();
@@ -125,8 +149,8 @@ class _AvailableDriversScreenState extends State<AvailableDriversScreen>
           ? MapService.distanceKm(
               _pickupLatLng!.latitude,
               _pickupLatLng!.longitude,
-              lat!,
-              lng!,
+              lat,
+              lng,
             )
           : double.maxFinite;
       final etaMin = distKm < double.maxFinite ? (distKm / 40 * 60).round() : 0;
@@ -136,6 +160,8 @@ class _AvailableDriversScreenState extends State<AvailableDriversScreen>
       final plate = (data['numberPlate'] ?? data['plate'] ?? '') as String;
       final rating = (data['rating'] ?? 0.0).toDouble();
       final photoUrl = data['photoUrl'] as String?;
+
+      final isBusy = _busyDriverIds.contains(doc.id);
 
       list.add(
         _DriverInfo(
@@ -149,6 +175,7 @@ class _AvailableDriversScreenState extends State<AvailableDriversScreen>
           photoUrl: photoUrl,
           position: LatLng(lat ?? 0, lng ?? 0),
           hasLocation: hasLocation,
+          isBusy: isBusy,
         ),
       );
 
@@ -174,6 +201,8 @@ class _AvailableDriversScreenState extends State<AvailableDriversScreen>
     }
 
     list.sort((a, b) {
+      if (a.isBusy && !b.isBusy) return 1;
+      if (!a.isBusy && b.isBusy) return -1;
       if (a.hasLocation && !b.hasLocation) return -1;
       if (!a.hasLocation && b.hasLocation) return 1;
       return a.distKm.compareTo(b.distKm);
@@ -313,13 +342,45 @@ class _AvailableDriversScreenState extends State<AvailableDriversScreen>
     }
   }
 
+  Future<double?> _fetchEstimatedFare() async {
+    double baseFee = 2500, pricePerKm = 2500, shortDistanceFee = 10000, shortThresholdKm = 2.8;
+    try {
+      final fareDoc = await db.collection('settings').doc('fare').get();
+      final fd = fareDoc.data() ?? {};
+      baseFee = (fd['baseFee'] as num?)?.toDouble() ?? baseFee;
+      pricePerKm = (fd['pricePerKm'] as num?)?.toDouble() ?? pricePerKm;
+      shortDistanceFee = (fd['shortDistanceFee'] as num?)?.toDouble() ?? shortDistanceFee;
+      shortThresholdKm = (fd['shortDistanceThresholdKm'] as num?)?.toDouble() ?? shortThresholdKm;
+    } catch (_) {}
+    double? distKm;
+    if (widget.pickupLat != null && widget.pickupLng != null) {
+      try {
+        final res = await http.get(Uri.parse(
+          'https://maps.googleapis.com/maps/api/directions/json'
+          '?origin=${widget.pickupLat},${widget.pickupLng}'
+          '&destination=${Uri.encodeComponent(widget.destination)}'
+          '&mode=driving&key=$googleMapsApiKey',
+        ));
+        final json = jsonDecode(res.body);
+        final routes = json['routes'] as List?;
+        if (routes != null && routes.isNotEmpty) {
+          distKm = (routes[0]['legs'][0]['distance']['value'] as num).toDouble() / 1000;
+        }
+      } catch (_) {}
+    }
+    if (distKm == null) return null;
+    return distKm < shortThresholdKm ? shortDistanceFee : baseFee + distKm * pricePerKm;
+  }
+
   void _showDriverSheet(_DriverInfo driver) {
     showModalBottomSheet(
       context: context,
       backgroundColor: Colors.transparent,
       isScrollControlled: true,
       builder: (_) => StatefulBuilder(
-        builder: (ctx, setSheet) => Container(
+        builder: (ctx, setSheet) {
+          final fare = _estimatedFare;
+          return Container(
           padding: EdgeInsets.fromLTRB(
             20,
             20,
@@ -377,13 +438,49 @@ class _AvailableDriversScreenState extends State<AvailableDriversScreen>
                     child: Column(
                       crossAxisAlignment: CrossAxisAlignment.start,
                       children: [
-                        Text(
-                          driver.name,
-                          style: const TextStyle(
-                            color: _navy,
-                            fontWeight: FontWeight.bold,
-                            fontSize: 17,
-                          ),
+                        Row(
+                          children: [
+                            Expanded(
+                              child: Text(
+                                driver.name,
+                                style: const TextStyle(
+                                  color: _navy,
+                                  fontWeight: FontWeight.bold,
+                                  fontSize: 17,
+                                ),
+                              ),
+                            ),
+                            const SizedBox(width: 8),
+                            if (fare != null)
+                                Column(
+                                  crossAxisAlignment: CrossAxisAlignment.end,
+                                  children: [
+                                    Container(
+                                      padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 3),
+                                      decoration: BoxDecoration(
+                                        color: Colors.green.withOpacity(0.12),
+                                        borderRadius: BorderRadius.circular(8),
+                                      ),
+                                      child: Text(
+                                        'MWK ${fare.toStringAsFixed(0)}',
+                                        style: TextStyle(
+                                          color: Colors.green.shade700,
+                                          fontWeight: FontWeight.bold,
+                                          fontSize: 12,
+                                        ),
+                                      ),
+                                    ),
+                                    const SizedBox(height: 2),
+                                    Text(
+                                      'Estimated fare',
+                                      style: TextStyle(
+                                        color: _navy.withOpacity(0.4),
+                                        fontSize: 10,
+                                      ),
+                                    ),
+                                  ],
+                                ),
+                          ],
                         ),
                         const SizedBox(height: 3),
                         Text(
@@ -520,7 +617,8 @@ class _AvailableDriversScreenState extends State<AvailableDriversScreen>
               ),
             ],
           ),
-        ),
+          );
+        },
       ),
     ).whenComplete(() {
       if (mounted) setState(() => _selectedDriverId = null);
@@ -535,6 +633,25 @@ class _AvailableDriversScreenState extends State<AvailableDriversScreen>
     try {
       final driverDoc = await db.collection('drivers').doc(driver.id).get();
       final dd = driverDoc.data() ?? {};
+      // Check if driver is currently on a trip
+      final busySnap = await db
+          .collection('rides')
+          .where('driverId', isEqualTo: driver.id)
+          .where('status', whereIn: ['accepted', 'in_trip'])
+          .limit(1)
+          .get();
+      if (busySnap.docs.isNotEmpty) {
+        if (mounted) {
+          ScaffoldMessenger.of(context).showSnackBar(
+            SnackBar(
+              content: Text('${driver.name} is currently on a trip. Please choose another driver.'),
+              backgroundColor: _red,
+              behavior: SnackBarBehavior.floating,
+            ),
+          );
+        }
+        return;
+      }
       dev.log(
         '[BOOK] driver doc exists: ${driverDoc.exists} | driver name: ${dd['name']}',
       );
@@ -1046,7 +1163,7 @@ class _AvailableDriversScreenState extends State<AvailableDriversScreen>
                         itemBuilder: (_, i) => _DriverCard(
                           driver: _drivers[i],
                           isSelected: _drivers[i].id == _selectedDriverId,
-                          onTap: () => _onDriverTapped(_drivers[i]),
+                          onTap: _drivers[i].isBusy ? null : () => _onDriverTapped(_drivers[i]),
                         ),
                       ),
                     ),
@@ -1097,6 +1214,7 @@ class _DriverInfo {
   final String? photoUrl;
   final LatLng position;
   final bool hasLocation;
+  final bool isBusy;
 
   const _DriverInfo({
     required this.id,
@@ -1109,13 +1227,14 @@ class _DriverInfo {
     required this.photoUrl,
     required this.position,
     required this.hasLocation,
+    this.isBusy = false,
   });
 }
 
 class _DriverCard extends StatelessWidget {
   final _DriverInfo driver;
   final bool isSelected;
-  final VoidCallback onTap;
+  final VoidCallback? onTap;
   const _DriverCard({
     required this.driver,
     required this.isSelected,
@@ -1131,10 +1250,14 @@ class _DriverCard extends StatelessWidget {
         width: 140,
         padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 10),
         decoration: BoxDecoration(
-          color: isSelected ? _navy.withOpacity(0.07) : _cream,
+          color: driver.isBusy
+              ? _red
+              : isSelected ? _navy.withOpacity(0.07) : _cream,
           borderRadius: BorderRadius.circular(16),
           border: Border.all(
-            color: isSelected ? _navy : _navy.withOpacity(0.07),
+            color: driver.isBusy
+                ? _red
+                : isSelected ? _navy : _navy.withOpacity(0.07),
             width: isSelected ? 2 : 1,
           ),
         ),
@@ -1142,40 +1265,71 @@ class _DriverCard extends StatelessWidget {
           mainAxisAlignment: MainAxisAlignment.center,
           mainAxisSize: MainAxisSize.min,
           children: [
-            // avatar
-            Container(
-              width: 44,
-              height: 44,
-              decoration: BoxDecoration(
-                shape: BoxShape.circle,
-                color: _navy.withOpacity(0.1),
-                image: driver.photoUrl != null
-                    ? DecorationImage(
-                        image: NetworkImage(driver.photoUrl!),
-                        fit: BoxFit.cover,
-                      )
-                    : null,
-              ),
-              child: driver.photoUrl == null
-                  ? Center(
-                      child: Text(
-                        driver.name.isNotEmpty
-                            ? driver.name[0].toUpperCase()
-                            : '?',
-                        style: const TextStyle(
-                          color: _navy,
-                          fontWeight: FontWeight.bold,
-                          fontSize: 18,
-                        ),
+            Stack(
+              clipBehavior: Clip.none,
+              children: [
+                Container(
+                  width: 40,
+                  height: 40,
+                  decoration: BoxDecoration(
+                    shape: BoxShape.circle,
+                    color: driver.isBusy
+                        ? Colors.white.withOpacity(0.2)
+                        : _navy.withOpacity(0.1),
+                    image: driver.photoUrl != null
+                        ? DecorationImage(
+                            image: NetworkImage(driver.photoUrl!),
+                            fit: BoxFit.cover,
+                            colorFilter: driver.isBusy
+                                ? ColorFilter.mode(
+                                    _red.withOpacity(0.5),
+                                    BlendMode.darken,
+                                  )
+                                : null,
+                          )
+                        : null,
+                  ),
+                  child: driver.photoUrl == null
+                      ? Center(
+                          child: Text(
+                            driver.name.isNotEmpty
+                                ? driver.name[0].toUpperCase()
+                                : '?',
+                            style: const TextStyle(
+                              color: Colors.white,
+                              fontWeight: FontWeight.bold,
+                              fontSize: 18,
+                            ),
+                          ),
+                        )
+                      : null,
+                ),
+                Positioned(
+                  top: -4,
+                  right: -4,
+                  child: Container(
+                    padding: const EdgeInsets.symmetric(horizontal: 4, vertical: 2),
+                    decoration: BoxDecoration(
+                      color: driver.isBusy ? Colors.white : Colors.green,
+                      borderRadius: BorderRadius.circular(6),
+                    ),
+                    child: Text(
+                      driver.isBusy ? 'Busy' : 'Free',
+                      style: TextStyle(
+                        color: driver.isBusy ? _red : Colors.white,
+                        fontSize: 8,
+                        fontWeight: FontWeight.bold,
                       ),
-                    )
-                  : null,
+                    ),
+                  ),
+                ),
+              ],
             ),
-            const SizedBox(height: 6),
+            const SizedBox(height: 4),
             Text(
               driver.name,
-              style: const TextStyle(
-                color: _navy,
+              style: TextStyle(
+                color: driver.isBusy ? Colors.white : _navy,
                 fontWeight: FontWeight.bold,
                 fontSize: 12,
               ),
@@ -1185,11 +1339,16 @@ class _DriverCard extends StatelessWidget {
             const SizedBox(height: 2),
             Text(
               [driver.car, driver.plate].where((s) => s.isNotEmpty).join(' • '),
-              style: TextStyle(color: _navy.withOpacity(0.5), fontSize: 10),
+              style: TextStyle(
+                color: driver.isBusy
+                    ? Colors.white.withOpacity(0.7)
+                    : _navy.withOpacity(0.5),
+                fontSize: 10,
+              ),
               maxLines: 1,
               overflow: TextOverflow.ellipsis,
             ),
-            const SizedBox(height: 5),
+            const SizedBox(height: 4),
             Row(
               mainAxisAlignment: MainAxisAlignment.center,
               children: [
@@ -1197,25 +1356,29 @@ class _DriverCard extends StatelessWidget {
                 const SizedBox(width: 2),
                 Text(
                   driver.rating > 0 ? driver.rating.toStringAsFixed(1) : 'New',
-                  style: const TextStyle(
-                    color: _navy,
+                  style: TextStyle(
+                    color: driver.isBusy ? Colors.white : _navy,
                     fontSize: 10,
                     fontWeight: FontWeight.w600,
                   ),
                 ),
               ],
             ),
-            const SizedBox(height: 5),
+            const SizedBox(height: 4),
             Container(
               padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 3),
               decoration: BoxDecoration(
-                color: driver.hasLocation ? _navy : _navy.withOpacity(0.35),
+                color: driver.isBusy
+                    ? Colors.white.withOpacity(0.2)
+                    : driver.hasLocation ? _navy : _navy.withOpacity(0.35),
                 borderRadius: BorderRadius.circular(8),
               ),
               child: Text(
-                driver.hasLocation
-                    ? '${driver.etaMin} min • ${driver.distKm.toStringAsFixed(1)} km'
-                    : 'Locating...',
+                driver.isBusy
+                    ? 'On Trip'
+                    : driver.hasLocation
+                        ? '${driver.etaMin} min • ${driver.distKm.toStringAsFixed(1)} km'
+                        : 'Locating...',
                 style: const TextStyle(
                   color: Colors.white,
                   fontSize: 9,

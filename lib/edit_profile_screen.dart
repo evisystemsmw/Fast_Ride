@@ -89,8 +89,9 @@ class _EditProfileScreenState extends State<EditProfileScreen> {
         );
         final res = await request.send();
         final body = jsonDecode(await res.stream.bytesToString());
-        if (body['secure_url'] == null)
+        if (body['secure_url'] == null) {
           throw Exception('Upload failed: ${body['error']?['message']}');
+        }
         photoUrl = body['secure_url'] as String;
       }
 

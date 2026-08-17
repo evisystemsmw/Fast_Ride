@@ -196,12 +196,14 @@ class _RideTrackingScreenState extends State<RideTrackingScreen> {
     LatLng? destination;
     if (_rideStatus == 'accepted' && _tripPhase != 'in_trip') {
       final pickupGeo = _rideData?['pickupLocation'] as GeoPoint?;
-      if (pickupGeo != null)
+      if (pickupGeo != null) {
         destination = LatLng(pickupGeo.latitude, pickupGeo.longitude);
+      }
     } else if (_tripPhase == 'in_trip' || _rideStatus == 'in_trip') {
       final destGeo = _rideData?['destinationLocation'] as GeoPoint?;
-      if (destGeo != null)
+      if (destGeo != null) {
         destination = LatLng(destGeo.latitude, destGeo.longitude);
+      }
     }
     if (destination == null) {
       _liveRouteDrawing = false;
@@ -361,8 +363,9 @@ class _RideTrackingScreenState extends State<RideTrackingScreen> {
         final destLoc = jsonDecode(
           destRes.body,
         )['results']?[0]?['geometry']?['location'];
-        if (pickupLoc == null || destLoc == null)
+        if (pickupLoc == null || destLoc == null) {
           throw Exception('Geocode failed');
+        }
         origin ??= LatLng(pickupLoc['lat'], pickupLoc['lng']);
         dest ??= LatLng(destLoc['lat'], destLoc['lng']);
       }
@@ -675,8 +678,9 @@ class _RideTrackingScreenState extends State<RideTrackingScreen> {
   }
 
   Color get _statusColor {
-    if (_rideStatus == 'accepted' && _tripPhase == 'arrived')
+    if (_rideStatus == 'accepted' && _tripPhase == 'arrived') {
       return Colors.orange;
+    }
     switch (_rideStatus) {
       case 'requested':
         return Colors.orange;
@@ -694,8 +698,9 @@ class _RideTrackingScreenState extends State<RideTrackingScreen> {
   }
 
   IconData get _statusIcon {
-    if (_rideStatus == 'accepted' && _tripPhase == 'arrived')
+    if (_rideStatus == 'accepted' && _tripPhase == 'arrived') {
       return Icons.place_rounded;
+    }
     switch (_rideStatus) {
       case 'accepted':
         return Icons.directions_car_rounded;
@@ -849,7 +854,9 @@ class _RideTrackingScreenState extends State<RideTrackingScreen> {
                       Expanded(
                         child: _InfoTile(
                           icon: Icons.straighten_rounded,
-                          label: (_tripPhase == 'in_trip' || _rideStatus == 'in_trip')
+                          label:
+                              (_tripPhase == 'in_trip' ||
+                                  _rideStatus == 'in_trip')
                               ? 'Remaining'
                               : 'Distance',
                           value: _distanceKm >= 1

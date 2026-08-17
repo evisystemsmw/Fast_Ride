@@ -8,7 +8,8 @@ const _red = Color(0xFFC53E21);
 const _cream = Color(0xFFF7EAD9);
 
 class CreateAccountScreen extends StatefulWidget {
-  const CreateAccountScreen({super.key});
+  const CreateAccountScreen({super.key, this.initialRole = 0});
+  final int initialRole;
 
   @override
   State<CreateAccountScreen> createState() => _CreateAccountScreenState();
@@ -21,7 +22,7 @@ class _CreateAccountScreenState extends State<CreateAccountScreen>
   @override
   void initState() {
     super.initState();
-    _tabController = TabController(length: 2, vsync: this);
+    _tabController = TabController(length: 2, vsync: this, initialIndex: widget.initialRole);
   }
 
   @override
@@ -117,8 +118,14 @@ class _RegisterFormState extends State<_RegisterForm> {
   bool _passwordsMatch = false;
   bool _loading = false;
   String? _error;
+  bool _invalidId = false;
 
   bool get _isDriver => widget.role == 'driver';
+
+  void _onIdChanged() {
+    final val = _idNumberController.text.toUpperCase();
+    setState(() => _invalidId = val.isNotEmpty && !val.startsWith('FR'));
+  }
 
   void _onPasswordChanged() {
     setState(() {
@@ -133,10 +140,12 @@ class _RegisterFormState extends State<_RegisterForm> {
     super.initState();
     _passwordController.addListener(_onPasswordChanged);
     _confirmPasswordController.addListener(_onPasswordChanged);
+    _idNumberController.addListener(_onIdChanged);
   }
 
   @override
   void dispose() {
+    _idNumberController.removeListener(_onIdChanged);
     _nameController.dispose();
     _emailController.dispose();
     _phoneController.dispose();
@@ -165,6 +174,11 @@ class _RegisterFormState extends State<_RegisterForm> {
             _carModelController.text.trim().isEmpty ||
             _plateController.text.trim().isEmpty)) {
       setState(() => _error = 'Please fill in all driver fields.');
+      return;
+    }
+    if (_isDriver &&
+        !_idNumberController.text.trim().toUpperCase().startsWith('FR')) {
+      setState(() => _error = 'Driver ID must start with FR (e.g. FR12345).');
       return;
     }
     if (!_passwordsMatch) {
@@ -267,7 +281,12 @@ class _RegisterFormState extends State<_RegisterForm> {
           ),
           if (_isDriver) ...[
             const SizedBox(height: 16),
-            _field(_idNumberController, 'ID Number', Icons.badge_outlined),
+            _field(
+              _idNumberController,
+              'ID Number (e.g. FR12345)',
+              Icons.badge_outlined,
+              errorText: _invalidId ? 'Invalid ID number — must start with FR' : null,
+            ),
             const SizedBox(height: 16),
             _field(
               _licenceController,
@@ -421,6 +440,7 @@ class _RegisterFormState extends State<_RegisterForm> {
     bool obscure = false,
     Widget? suffix,
     TextInputType keyboardType = TextInputType.text,
+    String? errorText,
   }) {
     return TextField(
       controller: controller,
@@ -432,12 +452,19 @@ class _RegisterFormState extends State<_RegisterForm> {
         hintStyle: TextStyle(color: _navy.withOpacity(0.4)),
         prefixIcon: Icon(icon, color: _navy.withOpacity(0.5)),
         suffixIcon: suffix,
+        errorText: errorText,
         filled: true,
         fillColor: Colors.white,
         contentPadding: const EdgeInsets.symmetric(vertical: 16),
         border: OutlineInputBorder(
           borderRadius: BorderRadius.circular(14),
           borderSide: BorderSide.none,
+        ),
+        enabledBorder: OutlineInputBorder(
+          borderRadius: BorderRadius.circular(14),
+          borderSide: errorText != null
+              ? const BorderSide(color: _red, width: 1.5)
+              : BorderSide.none,
         ),
       ),
     );

@@ -33,6 +33,7 @@ class _DriverHomeScreenState extends State<DriverHomeScreen> {
   String? _photoUrl;
   bool _isOffline = false;
   int _currentIndex = 0;
+  bool _inPipMode = false;
   StreamSubscription<bool>? _connectivitySub;
 
   @override
@@ -79,8 +80,8 @@ class _DriverHomeScreenState extends State<DriverHomeScreen> {
     final doc = await db.collection('drivers').doc(uid).get();
     if (doc.exists && mounted) {
       setState(() {
-        _name = (doc.data() as Map<String, dynamic>?)?['name'] ?? '';
-        _photoUrl = (doc.data() as Map<String, dynamic>?)?['photoUrl'];
+        _name = (doc.data())?['name'] ?? '';
+        _photoUrl = (doc.data())?['photoUrl'];
       });
     }
   }
@@ -97,6 +98,7 @@ class _DriverHomeScreenState extends State<DriverHomeScreen> {
   late final _ridesPage = const _RidesPage();
   late final _navPage = DriverNavigationScreen(
     onRideAccepted: () => setState(() => _currentIndex = 1),
+    onPipChanged: (pip) => setState(() => _inPipMode = pip),
   );
 
   List<Widget> get _pages => [
@@ -115,7 +117,7 @@ class _DriverHomeScreenState extends State<DriverHomeScreen> {
         bottom: false,
         child: Column(
           children: [
-            if (_currentIndex == 0)
+            if (_currentIndex == 0 && !_inPipMode)
               Padding(
                 padding: const EdgeInsets.symmetric(
                   horizontal: 24,
@@ -186,10 +188,12 @@ class _DriverHomeScreenState extends State<DriverHomeScreen> {
           ],
         ),
       ),
-      bottomNavigationBar: _BottomNav(
-        currentIndex: _currentIndex,
-        onTap: (i) => setState(() => _currentIndex = i),
-      ),
+      bottomNavigationBar: _inPipMode
+          ? const SizedBox.shrink()
+          : _BottomNav(
+              currentIndex: _currentIndex,
+              onTap: (i) => setState(() => _currentIndex = i),
+            ),
     );
   }
 }
@@ -823,7 +827,7 @@ class _DashboardPageState extends State<_DashboardPage> {
                 : db
                       .collection('rides')
                       .where('driverId', isEqualTo: uid)
-                      .where('status', isEqualTo: 'scheduled')
+                      .where('status', whereIn: ['scheduled', 'requested'])
                       .snapshots(),
             builder: (context, snap) {
               if (snap.connectionState == ConnectionState.waiting &&
@@ -909,11 +913,25 @@ class _ScheduledBookingCardState extends State<_ScheduledBookingCard> {
   bool _loadingFare = true;
   bool _coordsFound = false;
   bool _responding = false;
+  bool _driverBusy = false;
 
   @override
   void initState() {
     super.initState();
     _loadFareAndDistance();
+    _checkDriverBusy();
+  }
+
+  Future<void> _checkDriverBusy() async {
+    final uid = FirebaseAuth.instance.currentUser?.uid;
+    if (uid == null) return;
+    final snap = await db
+        .collection('rides')
+        .where('driverId', isEqualTo: uid)
+        .where('status', whereIn: ['accepted', 'in_trip'])
+        .limit(1)
+        .get();
+    if (mounted) setState(() => _driverBusy = snap.docs.isNotEmpty);
   }
 
   Future<void> _loadFareAndDistance() async {
@@ -1169,35 +1187,86 @@ class _ScheduledBookingCardState extends State<_ScheduledBookingCard> {
             ),
           ),
           const SizedBox(height: 12),
-          // Availability response
+          // Availability response / travel button
           if (driverAvailable == true)
-            Container(
-              width: double.infinity,
-              padding: const EdgeInsets.symmetric(vertical: 10),
-              decoration: BoxDecoration(
-                color: Colors.green.withValues(alpha: 0.1),
-                borderRadius: BorderRadius.circular(12),
-              ),
-              child: const Row(
-                mainAxisAlignment: MainAxisAlignment.center,
-                children: [
-                  Icon(
-                    Icons.check_circle_rounded,
-                    color: Colors.green,
-                    size: 16,
-                  ),
-                  SizedBox(width: 6),
-                  Text(
-                    'You confirmed availability',
-                    style: TextStyle(
-                      color: Colors.green,
-                      fontWeight: FontWeight.w600,
-                      fontSize: 13,
+            _driverBusy
+                ? Container(
+                    width: double.infinity,
+                    padding: const EdgeInsets.symmetric(vertical: 12),
+                    decoration: BoxDecoration(
+                      color: Colors.orange.withValues(alpha: 0.1),
+                      borderRadius: BorderRadius.circular(12),
+                      border: Border.all(
+                        color: Colors.orange.withValues(alpha: 0.4),
+                      ),
                     ),
-                  ),
-                ],
-              ),
-            )
+                    child: const Row(
+                      mainAxisAlignment: MainAxisAlignment.center,
+                      children: [
+                        Icon(
+                          Icons.directions_car_rounded,
+                          color: Colors.orange,
+                          size: 16,
+                        ),
+                        SizedBox(width: 8),
+                        Text(
+                          'Finish current ride first',
+                          style: TextStyle(
+                            color: Colors.orange,
+                            fontWeight: FontWeight.w600,
+                            fontSize: 13,
+                          ),
+                        ),
+                      ],
+                    ),
+                  )
+                : SizedBox(
+                    width: double.infinity,
+                    child: ElevatedButton.icon(
+                      onPressed: _responding
+                          ? null
+                          : () async {
+                              setState(() => _responding = true);
+                              try {
+                                await db
+                                    .collection('rides')
+                                    .doc(widget.rideId)
+                                    .update({'status': 'accepted'});
+                                final homeState = context
+                                    .findAncestorStateOfType<
+                                      _DriverHomeScreenState
+                                    >();
+                                homeState?.setState(
+                                  () => homeState._currentIndex = 1,
+                                );
+                              } finally {
+                                if (mounted) setState(() => _responding = false);
+                              }
+                            },
+                      icon: _responding
+                          ? const SizedBox(
+                              width: 14,
+                              height: 14,
+                              child: CircularProgressIndicator(
+                                strokeWidth: 2,
+                                color: Colors.white,
+                              ),
+                            )
+                          : const Icon(Icons.navigation_rounded, size: 16),
+                      label: const Text(
+                        'Travel to Pickup',
+                        style: TextStyle(fontWeight: FontWeight.bold),
+                      ),
+                      style: ElevatedButton.styleFrom(
+                        backgroundColor: _navy,
+                        foregroundColor: Colors.white,
+                        padding: const EdgeInsets.symmetric(vertical: 13),
+                        shape: RoundedRectangleBorder(
+                          borderRadius: BorderRadius.circular(12),
+                        ),
+                      ),
+                    ),
+                  )
           else
             Row(
               children: [
@@ -1321,11 +1390,12 @@ class _DriverSosScreenState extends State<_DriverSosScreen> {
       'createdAt': FieldValue.serverTimestamp(),
       'isSystem': true,
     });
-    if (mounted)
+    if (mounted) {
       setState(() {
         _sosId = ref.id;
         _creating = false;
       });
+    }
   }
 
   Future<void> _send() async {
@@ -1403,11 +1473,12 @@ class _DriverSosScreenState extends State<_DriverSosScreen> {
         'distressSentAt': FieldValue.serverTimestamp(),
         if (locationData.isNotEmpty) 'location': locationData,
       });
-      if (mounted)
+      if (mounted) {
         setState(() {
           _distressSent = true;
           _distressSending = false;
         });
+      }
       Future.delayed(const Duration(milliseconds: 300), () {
         if (_scrollController.hasClients) {
           _scrollController.animateTo(
@@ -1418,11 +1489,12 @@ class _DriverSosScreenState extends State<_DriverSosScreen> {
         }
       });
     } catch (_) {
-      if (mounted)
+      if (mounted) {
         setState(() {
           _distressSending = false;
           _holdProgress = 0;
         });
+      }
     }
   }
 
@@ -2109,7 +2181,7 @@ class _DriverProfilePageState extends State<_DriverProfilePage> {
     if (uid == null) return;
 
     final doc = await db.collection('drivers').doc(uid).get();
-    final profileData = (doc.data() as Map<String, dynamic>?) ?? {};
+    final profileData = doc.data() ?? {};
 
     // Count completed rides and calculate rating
     final ridesSnap = await db
@@ -2123,7 +2195,10 @@ class _DriverProfilePageState extends State<_DriverProfilePage> {
     int ratingCount = 0;
     for (final r in completed) {
       final rating = (r.data()['driverRating'] ?? 0).toDouble();
-      if (rating > 0) { ratingSum += rating; ratingCount++; }
+      if (rating > 0) {
+        ratingSum += rating;
+        ratingCount++;
+      }
     }
 
     if (mounted) {
@@ -2861,6 +2936,7 @@ class _NavItem extends StatelessWidget {
           borderRadius: BorderRadius.circular(20),
         ),
         child: Row(
+          mainAxisSize: MainAxisSize.min,
           children: [
             Icon(
               icon,
@@ -2878,6 +2954,7 @@ class _NavItem extends StatelessWidget {
                   fontSize: 13,
                   fontWeight: FontWeight.w600,
                 ),
+                overflow: TextOverflow.ellipsis,
               ),
             ],
           ],

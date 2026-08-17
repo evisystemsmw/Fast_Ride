@@ -103,7 +103,9 @@ class MapService {
     return null;
   }
 
-  static Stream<({Position smoothed, Position raw})> trackLocation({bool continuous = false}) {
+  static Stream<({Position smoothed, Position raw})> trackLocation({
+    bool continuous = false,
+  }) {
     return Geolocator.getPositionStream(
       locationSettings: LocationSettings(
         accuracy: LocationAccuracy.high,
@@ -141,7 +143,7 @@ class MapService {
 
     try {
       debugPrint(
-        '[MapService] updateDriverLocation called uid=$uid lat=${position.latitude.toStringAsFixed(6)} lng=${position.longitude.toStringAsFixed(6)} acc=${position.accuracy.toStringAsFixed(1)} minDist=${minDistanceMeters}ms minMillis=${minMillis}',
+        '[MapService] updateDriverLocation called uid=$uid lat=${position.latitude.toStringAsFixed(6)} lng=${position.longitude.toStringAsFixed(6)} acc=${position.accuracy.toStringAsFixed(1)} minDist=${minDistanceMeters}ms minMillis=$minMillis',
       );
     } catch (_) {}
 
@@ -225,46 +227,45 @@ class MapService {
   static double _rad(double deg) => deg * pi / 180;
 
   // ── Car marker bitmap ──────────────────────────────────
-  static BitmapDescriptor? _carBitmap;
+  // Cache bitmaps keyed by heading rounded to nearest 5°
+  static final Map<int, BitmapDescriptor> _carBitmapCache = {};
+  static ui.Image? _carSrcImage;
 
   /// Returns a rotated car icon as a BitmapDescriptor.
   /// [heading] is degrees clockwise from north (0–360).
+  /// Bitmaps are cached per 5° bucket to avoid re-rendering every fix.
   static Future<BitmapDescriptor> carMarker(double heading) async {
-    // Load the asset image
-    final byteData = await rootBundle.load('assets/car model.png');
-    final codec = await ui.instantiateImageCodec(
-      byteData.buffer.asUint8List(),
-      targetWidth: 160,
-      targetHeight: 107,
-    );
-    final frame = await codec.getNextFrame();
-    final srcImage = frame.image;
+    final bucket = ((heading / 5).round() * 5) % 360;
+    if (_carBitmapCache.containsKey(bucket)) return _carBitmapCache[bucket]!;
 
-    // The image is 1536x1024 landscape — front of car is the LEFT half.
-    // We crop the left half (front), then rotate the whole thing so the
-    // front points UP (north), then apply the live heading rotation.
+    // Load source image once
+    _carSrcImage ??= await () async {
+      final byteData = await rootBundle.load('assets/car model.png');
+      final codec = await ui.instantiateImageCodec(
+        byteData.buffer.asUint8List(),
+        targetWidth: 160,
+        targetHeight: 107,
+      );
+      return (await codec.getNextFrame()).image;
+    }();
+
     const outSize = 96.0;
     final recorder = ui.PictureRecorder();
     final canvas = Canvas(recorder, Rect.fromLTWH(0, 0, outSize, outSize));
-
-    // Rotate: -90° so front (right side of image) points up, then apply heading
     canvas.translate(outSize / 2, outSize / 2);
-    canvas.rotate((heading + 90) * pi / 180);
+    canvas.rotate((bucket + 90) * pi / 180);
     canvas.translate(-outSize / 2, -outSize / 2);
-
-    // Draw the full resized image scaled to fill the square
-    final paint = Paint()..filterQuality = FilterQuality.high;
     canvas.drawImageRect(
-      srcImage,
-      Rect.fromLTWH(0, 0, srcImage.width.toDouble(), srcImage.height.toDouble()),
+      _carSrcImage!,
+      Rect.fromLTWH(0, 0, _carSrcImage!.width.toDouble(), _carSrcImage!.height.toDouble()),
       Rect.fromLTWH(0, 0, outSize, outSize),
-      paint,
+      Paint()..filterQuality = FilterQuality.high,
     );
-
-    final picture = recorder.endRecording();
-    final img = await picture.toImage(outSize.toInt(), outSize.toInt());
+    final img = await recorder.endRecording().toImage(outSize.toInt(), outSize.toInt());
     final bytes = await img.toByteData(format: ui.ImageByteFormat.png);
-    return BitmapDescriptor.bytes(bytes!.buffer.asUint8List());
+    final descriptor = BitmapDescriptor.bytes(bytes!.buffer.asUint8List());
+    _carBitmapCache[bucket] = descriptor;
+    return descriptor;
   }
 
   // ── Roads API snap-to-road ─────────────────────────────

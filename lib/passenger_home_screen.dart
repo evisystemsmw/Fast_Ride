@@ -50,7 +50,9 @@ class _PassengerHomeScreenState extends State<PassengerHomeScreen> {
   StreamSubscription? _notifPersonalSub;
   StreamSubscription? _notifUserIdSub;
   StreamSubscription? _activeRideSub;
+  StreamSubscription? _scheduledRideSub;
   Timer? _searchDebounce;
+  final Map<String, Timer> _autoStartTimers = {};
   Map<String, dynamic>? _activeRide;
   String? _activeRideId;
 
@@ -73,6 +75,7 @@ class _PassengerHomeScreenState extends State<PassengerHomeScreen> {
     _loadUser();
     _listenNotifications();
     _listenActiveRide();
+    _listenScheduledRides();
     _initLocation();
     _initConnectivity();
   }
@@ -84,6 +87,11 @@ class _PassengerHomeScreenState extends State<PassengerHomeScreen> {
     _notifPersonalSub?.cancel();
     _notifUserIdSub?.cancel();
     _activeRideSub?.cancel();
+    _scheduledRideSub?.cancel();
+    for (final t in _autoStartTimers.values) {
+      t.cancel();
+    }
+    _autoStartTimers.clear();
     _searchDebounce?.cancel();
     _mapCtrl?.dispose();
     super.dispose();
@@ -195,54 +203,99 @@ class _PassengerHomeScreenState extends State<PassengerHomeScreen> {
         .where('target', whereIn: broadcastTargets)
         .where('isRead', isEqualTo: false)
         .snapshots()
-        .listen(
-          (snap) {
-            final hasUnread = snap.docs.any((doc) {
-              final data = doc.data();
-              final type = (data['type'] as String?)?.toLowerCase().trim() ?? '';
-              final title = (data['title'] as String?)?.toLowerCase().trim() ?? '';
-              final isRideRequest = title.contains('ride request') || title.contains('new ride request');
-              final allowed = type.isEmpty || type == 'notification' || type == 'ticket_reply';
-              return !isRideRequest && allowed;
-            });
-            if (mounted && hasUnread) setState(() => _hasNotification = true);
-          },
-          onError: (_) {},
-        );
+        .listen((snap) {
+          final hasUnread = snap.docs.any((doc) {
+            final data = doc.data();
+            final type = (data['type'] as String?)?.toLowerCase().trim() ?? '';
+            final title =
+                (data['title'] as String?)?.toLowerCase().trim() ?? '';
+            final isRideRequest =
+                title.contains('ride request') ||
+                title.contains('new ride request');
+            final allowed =
+                type.isEmpty ||
+                type == 'notification' ||
+                type == 'ticket_reply';
+            return !isRideRequest && allowed;
+          });
+          if (mounted && hasUnread) setState(() => _hasNotification = true);
+        }, onError: (_) {});
     // personal notifications
     _notifPersonalSub = db
         .collection('notifications')
         .where('uid', isEqualTo: uid)
         .where('isRead', isEqualTo: false)
         .snapshots()
-        .listen(
-          (snap) {
-            final hasUnread = snap.docs.any((doc) {
-              final data = doc.data();
-              final type = (data['type'] as String?)?.toLowerCase().trim() ?? '';
-              return type.isEmpty || type == 'notification' || type == 'ticket_reply';
-            });
-            if (mounted && hasUnread) setState(() => _hasNotification = true);
-          },
-          onError: (_) {},
-        );
+        .listen((snap) {
+          final hasUnread = snap.docs.any((doc) {
+            final data = doc.data();
+            final type = (data['type'] as String?)?.toLowerCase().trim() ?? '';
+            return type.isEmpty ||
+                type == 'notification' ||
+                type == 'ticket_reply';
+          });
+          if (mounted && hasUnread) setState(() => _hasNotification = true);
+        }, onError: (_) {});
 
     _notifUserIdSub = db
         .collection('notifications')
         .where('userId', isEqualTo: uid)
         .where('isRead', isEqualTo: false)
         .snapshots()
-        .listen(
-          (snap) {
-            final hasUnread = snap.docs.any((doc) {
-              final data = doc.data();
-              final type = (data['type'] as String?)?.toLowerCase().trim() ?? '';
-              return type.isEmpty || type == 'notification' || type == 'ticket_reply';
-            });
-            if (mounted && hasUnread) setState(() => _hasNotification = true);
-          },
-          onError: (_) {},
-        );
+        .listen((snap) {
+          final hasUnread = snap.docs.any((doc) {
+            final data = doc.data();
+            final type = (data['type'] as String?)?.toLowerCase().trim() ?? '';
+            return type.isEmpty ||
+                type == 'notification' ||
+                type == 'ticket_reply';
+          });
+          if (mounted && hasUnread) setState(() => _hasNotification = true);
+        }, onError: (_) {});
+  }
+
+  void _listenScheduledRides() {
+    final uid = FirebaseAuth.instance.currentUser?.uid;
+    if (uid == null) return;
+    _scheduledRideSub = db
+        .collection('rides')
+        .where('passengerId', isEqualTo: uid)
+        .where('status', isEqualTo: 'scheduled')
+        .snapshots()
+        .listen((snap) {
+          final activeIds = snap.docs.map((d) => d.id).toSet();
+          // cancel timers for rides no longer scheduled
+          _autoStartTimers.keys
+              .where((id) => !activeIds.contains(id))
+              .toList()
+              .forEach((id) {
+                _autoStartTimers.remove(id)?.cancel();
+              });
+          for (final doc in snap.docs) {
+            if (_autoStartTimers.containsKey(doc.id)) continue;
+            final scheduledAt = (doc.data()['scheduledAt'] as Timestamp?)
+                ?.toDate();
+            if (scheduledAt == null) continue;
+            final triggerAt = scheduledAt.subtract(const Duration(minutes: 10));
+            final delay = triggerAt.difference(DateTime.now());
+            if (delay.isNegative) {
+              _autoStartRide(doc.id);
+            } else {
+              _autoStartTimers[doc.id] = Timer(
+                delay,
+                () => _autoStartRide(doc.id),
+              );
+            }
+          }
+        });
+  }
+
+  Future<void> _autoStartRide(String rideId) async {
+    _autoStartTimers.remove(rideId);
+    final doc = await db.collection('rides').doc(rideId).get();
+    if (!doc.exists) return;
+    if ((doc.data()?['status'] as String?) != 'scheduled') return;
+    await db.collection('rides').doc(rideId).update({'status': 'requested'});
   }
 
   String? _lastAutoNavRideId;
@@ -287,9 +340,7 @@ class _PassengerHomeScreenState extends State<PassengerHomeScreen> {
                 Navigator.push(
                   context,
                   MaterialPageRoute(
-                    builder: (_) => RideTrackingScreen(
-                      rideId: doc.id,
-                    ),
+                    builder: (_) => RideTrackingScreen(rideId: doc.id),
                   ),
                 );
               });
@@ -764,9 +815,8 @@ class _PassengerHomeScreenState extends State<PassengerHomeScreen> {
                           onTap: () => Navigator.push(
                             context,
                             MaterialPageRoute(
-                              builder: (_) => RideTrackingScreen(
-                                rideId: _activeRideId!,
-                              ),
+                              builder: (_) =>
+                                  RideTrackingScreen(rideId: _activeRideId!),
                             ),
                           ),
                         ),
@@ -855,7 +905,7 @@ class _RideHistoryPageState extends State<_RideHistoryPage> {
       crossAxisAlignment: CrossAxisAlignment.start,
       children: [
         Padding(
-          padding: const EdgeInsets.fromLTRB(24, 16, 24, 8),
+          padding: const EdgeInsets.fromLTRB(24, 0, 24, 8),
           child: Text(
             'RIDE HISTORY',
             style: TextStyle(
@@ -925,6 +975,17 @@ class _RideHistoryPageState extends State<_RideHistoryPage> {
                   final d = allDocs[i].data() as Map<String, dynamic>;
                   final ts = (d['createdAt'] as Timestamp?)?.toDate();
                   final status = (d['status'] ?? '') as String;
+                  // Hide rides cancelled before a driver was ever assigned
+                  // Hide pending rides with no driver selected yet
+                  if (status == 'cancelled' && d['driverId'] == null) {
+                    return const SizedBox.shrink();
+                  }
+                  if (status == 'pending' && d['driverId'] == null) {
+                    return const SizedBox.shrink();
+                  }
+                  if (status == 'scheduled' && d['driverId'] == null) {
+                    return const SizedBox.shrink();
+                  }
                   final isScheduled = status == 'scheduled';
                   final scheduledAt = (d['scheduledAt'] as Timestamp?)
                       ?.toDate();
@@ -1537,29 +1598,30 @@ class _ScheduledRideCardState extends State<_ScheduledRideCard> {
               ),
             ],
             const SizedBox(height: 10),
-            // Expand toggle hint
-            Row(
-              mainAxisAlignment: MainAxisAlignment.center,
-              children: [
-                Icon(
-                  _expanded
-                      ? Icons.keyboard_arrow_up_rounded
-                      : Icons.keyboard_arrow_down_rounded,
-                  color: Colors.white.withOpacity(0.35),
-                  size: 18,
-                ),
-                const SizedBox(width: 4),
-                Text(
-                  _expanded ? 'Tap to collapse' : 'Tap to expand options',
-                  style: TextStyle(
+            // Expand toggle hint — only shown when driver is assigned
+            if (driverName.isNotEmpty)
+              Row(
+                mainAxisAlignment: MainAxisAlignment.center,
+                children: [
+                  Icon(
+                    _expanded
+                        ? Icons.keyboard_arrow_up_rounded
+                        : Icons.keyboard_arrow_down_rounded,
                     color: Colors.white.withOpacity(0.35),
-                    fontSize: 11,
+                    size: 18,
                   ),
-                ),
-              ],
-            ),
-            // Cancel button — only shown when expanded
-            if (_expanded) ...[
+                  const SizedBox(width: 4),
+                  Text(
+                    _expanded ? 'Tap to collapse' : 'Tap to expand options',
+                    style: TextStyle(
+                      color: Colors.white.withOpacity(0.35),
+                      fontSize: 11,
+                    ),
+                  ),
+                ],
+              ),
+            // Cancel button — always visible if no driver, otherwise expand to show
+            if (driverName.isEmpty || _expanded) ...[
               const SizedBox(height: 10),
               Divider(color: Colors.white.withOpacity(0.1), height: 1),
               const SizedBox(height: 10),
@@ -1647,6 +1709,9 @@ class _BookPageState extends State<_BookPage> {
   double? _pickupLng;
   double? _destLat;
   double? _destLng;
+  bool _pickupConfirmed = false;
+  bool _destConfirmed = false;
+  String? _locationError;
 
   // places search
   TextEditingController? _activeCtrl;
@@ -1804,6 +1869,7 @@ class _BookPageState extends State<_BookPage> {
       if (pos == null) return;
       _pickupLat = pos.latitude;
       _pickupLng = pos.longitude;
+      _pickupConfirmed = true;
 
       final res = await http.get(
         Uri.parse(
@@ -1814,8 +1880,6 @@ class _BookPageState extends State<_BookPage> {
       final data = jsonDecode(res.body);
       final results = data['results'] as List?;
 
-      // Pick the most human-readable result: prefer premise/route/locality over
-      // plus_code or political entries which tend to be long ugly strings
       String? address;
       if (results != null && results.isNotEmpty) {
         const preferred = [
@@ -1849,6 +1913,15 @@ class _BookPageState extends State<_BookPage> {
 
   Future<void> _searchPlaces(String query, TextEditingController ctrl) async {
     _activeCtrl = ctrl;
+    if (ctrl == _pickupCtrl) {
+      _pickupLat = null;
+      _pickupLng = null;
+      _pickupConfirmed = false;
+    } else {
+      _destLat = null;
+      _destLng = null;
+      _destConfirmed = false;
+    }
     if (query.isEmpty) {
       setState(() => _suggestions = []);
       return;
@@ -1904,9 +1977,11 @@ class _BookPageState extends State<_BookPage> {
         if (_activeCtrl == _pickupCtrl) {
           _pickupLat = lat;
           _pickupLng = lng;
+          _pickupConfirmed = true;
         } else {
           _destLat = lat;
           _destLng = lng;
+          _destConfirmed = true;
         }
       }
     } catch (_) {}
@@ -1932,48 +2007,25 @@ class _BookPageState extends State<_BookPage> {
     final dest = _destCtrl.text.trim();
     if (pickup.isEmpty || dest.isEmpty) return;
 
-    setState(() => _loading = true);
+    if (!_pickupConfirmed) {
+      setState(() => _locationError = 'pickup');
+      _searchPlaces(_pickupCtrl.text, _pickupCtrl);
+      return;
+    }
+    if (!_destConfirmed) {
+      setState(() => _locationError = 'dest');
+      _searchPlaces(_destCtrl.text, _destCtrl);
+      return;
+    }
+    setState(() {
+      _locationError = null;
+      _loading = true;
+    });
     try {
-      // If pickup coords are missing (user typed without selecting suggestion),
-      // geocode now before creating the ride
-      if (_pickupLat == null || _pickupLng == null) {
-        try {
-          final res = await http.get(
-            Uri.parse(
-              'https://maps.googleapis.com/maps/api/geocode/json'
-              '?address=${Uri.encodeComponent(pickup)}&key=$_googleApiKey',
-            ),
-          );
-          final data = jsonDecode(res.body);
-          final loc = data['results']?[0]?['geometry']?['location'];
-          if (loc != null) {
-            _pickupLat = (loc['lat'] as num).toDouble();
-            _pickupLng = (loc['lng'] as num).toDouble();
-          }
-        } catch (_) {}
-      }
-
       final uid = FirebaseAuth.instance.currentUser!.uid;
       final userDoc = await db.collection('users').doc(uid).get();
       final name = (userDoc.data())?['name'] ?? '';
       final phone = (userDoc.data())?['phone'] ?? '';
-
-      if (_destLat == null || _destLng == null) {
-        try {
-          final res = await http.get(
-            Uri.parse(
-              'https://maps.googleapis.com/maps/api/geocode/json'
-              '?address=${Uri.encodeComponent(dest)}&key=$_googleApiKey',
-            ),
-          );
-          final data = jsonDecode(res.body);
-          final loc = data['results']?[0]?['geometry']?['location'];
-          if (loc != null) {
-            _destLat = (loc['lat'] as num).toDouble();
-            _destLng = (loc['lng'] as num).toDouble();
-          }
-        } catch (_) {}
-      }
       final rideRef = await db.collection('rides').add({
         'passengerId': uid,
         'passengerName': name,
@@ -2051,7 +2103,22 @@ class _BookPageState extends State<_BookPage> {
                   icon: Icons.my_location_rounded,
                   isSearching: _searching && _activeCtrl == _pickupCtrl,
                   onChanged: (q) => _searchPlaces(q, _pickupCtrl),
+                  onDismiss: () => setState(() => _suggestions = []),
                 ),
+                if (_locationError == 'pickup')
+                  Padding(
+                    padding: const EdgeInsets.only(top: 6, left: 4),
+                    child: Row(
+                      children: [
+                        const Icon(Icons.info_outline, color: _red, size: 14),
+                        const SizedBox(width: 4),
+                        Text(
+                          'Please select a location from the suggestions',
+                          style: const TextStyle(color: _red, fontSize: 12),
+                        ),
+                      ],
+                    ),
+                  ),
                 if (_suggestions.isNotEmpty && _activeCtrl == _pickupCtrl)
                   _SuggestionsList(
                     suggestions: _suggestions,
@@ -2065,7 +2132,22 @@ class _BookPageState extends State<_BookPage> {
                   icon: Icons.location_on_rounded,
                   isSearching: _searching && _activeCtrl == _destCtrl,
                   onChanged: (q) => _searchPlaces(q, _destCtrl),
+                  onDismiss: () => setState(() => _suggestions = []),
                 ),
+                if (_locationError == 'dest')
+                  Padding(
+                    padding: const EdgeInsets.only(top: 6, left: 4),
+                    child: Row(
+                      children: [
+                        const Icon(Icons.info_outline, color: _red, size: 14),
+                        const SizedBox(width: 4),
+                        Text(
+                          'Please select a location from the suggestions',
+                          style: const TextStyle(color: _red, fontSize: 12),
+                        ),
+                      ],
+                    ),
+                  ),
                 if (_suggestions.isNotEmpty && _activeCtrl == _destCtrl)
                   _SuggestionsList(
                     suggestions: _suggestions,
@@ -2315,18 +2397,24 @@ class _SearchField extends StatelessWidget {
   final IconData icon;
   final bool isSearching;
   final ValueChanged<String> onChanged;
+  final VoidCallback? onDismiss;
   const _SearchField({
     required this.controller,
     required this.hint,
     required this.icon,
     required this.isSearching,
     required this.onChanged,
+    this.onDismiss,
   });
   @override
   Widget build(BuildContext context) {
     return TextField(
       controller: controller,
       onChanged: onChanged,
+      onSubmitted: (_) {
+        onDismiss?.call();
+        FocusScope.of(context).unfocus();
+      },
       style: const TextStyle(color: _navy, fontSize: 14),
       decoration: InputDecoration(
         hintText: hint,
@@ -3461,6 +3549,9 @@ class _ScheduleBookingSheetState extends State<_ScheduleBookingSheet> {
   bool _locating = false;
   double? _pickupLat, _pickupLng;
   double? _destLat, _destLng;
+  bool _pickupConfirmed = false;
+  bool _destConfirmed = false;
+  String? _locationError;
   TextEditingController? _activeCtrl;
   List<Map<String, dynamic>> _suggestions = [];
   bool _searching = false;
@@ -3522,6 +3613,7 @@ class _ScheduleBookingSheetState extends State<_ScheduleBookingSheet> {
       if (pos == null) return;
       _pickupLat = pos.latitude;
       _pickupLng = pos.longitude;
+      _pickupConfirmed = true;
       final res = await http.get(
         Uri.parse(
           'https://maps.googleapis.com/maps/api/geocode/json'
@@ -3562,6 +3654,15 @@ class _ScheduleBookingSheetState extends State<_ScheduleBookingSheet> {
 
   Future<void> _searchPlaces(String query, TextEditingController ctrl) async {
     _activeCtrl = ctrl;
+    if (ctrl == _pickupCtrl) {
+      _pickupLat = null;
+      _pickupLng = null;
+      _pickupConfirmed = false;
+    } else {
+      _destLat = null;
+      _destLng = null;
+      _destConfirmed = false;
+    }
     if (query.isEmpty) {
       setState(() => _suggestions = []);
       return;
@@ -3617,9 +3718,11 @@ class _ScheduleBookingSheetState extends State<_ScheduleBookingSheet> {
         if (_activeCtrl == _pickupCtrl) {
           _pickupLat = lat;
           _pickupLng = lng;
+          _pickupConfirmed = true;
         } else {
           _destLat = lat;
           _destLng = lng;
+          _destConfirmed = true;
         }
       }
     } catch (_) {}
@@ -3639,38 +3742,21 @@ class _ScheduleBookingSheetState extends State<_ScheduleBookingSheet> {
       );
       return;
     }
-    setState(() => _loading = true);
+    if (!_pickupConfirmed) {
+      setState(() => _locationError = 'pickup');
+      _searchPlaces(_pickupCtrl.text, _pickupCtrl);
+      return;
+    }
+    if (!_destConfirmed) {
+      setState(() => _locationError = 'dest');
+      _searchPlaces(_destCtrl.text, _destCtrl);
+      return;
+    }
+    setState(() {
+      _locationError = null;
+      _loading = true;
+    });
     try {
-      if (_pickupLat == null || _pickupLng == null) {
-        try {
-          final res = await http.get(
-            Uri.parse(
-              'https://maps.googleapis.com/maps/api/geocode/json?address=${Uri.encodeComponent(pickup)}&key=$_googleApiKey',
-            ),
-          );
-          final data = jsonDecode(res.body);
-          final loc = data['results']?[0]?['geometry']?['location'];
-          if (loc != null) {
-            _pickupLat = (loc['lat'] as num).toDouble();
-            _pickupLng = (loc['lng'] as num).toDouble();
-          }
-        } catch (_) {}
-      }
-      if (_destLat == null || _destLng == null) {
-        try {
-          final res = await http.get(
-            Uri.parse(
-              'https://maps.googleapis.com/maps/api/geocode/json?address=${Uri.encodeComponent(dest)}&key=$_googleApiKey',
-            ),
-          );
-          final data = jsonDecode(res.body);
-          final loc = data['results']?[0]?['geometry']?['location'];
-          if (loc != null) {
-            _destLat = (loc['lat'] as num).toDouble();
-            _destLng = (loc['lng'] as num).toDouble();
-          }
-        } catch (_) {}
-      }
       final uid = FirebaseAuth.instance.currentUser!.uid;
       final userDoc = await db.collection('users').doc(uid).get();
       final name = (userDoc.data())?['name'] ?? '';
@@ -3850,7 +3936,22 @@ class _ScheduleBookingSheetState extends State<_ScheduleBookingSheet> {
                 icon: Icons.my_location_rounded,
                 isSearching: _searching && _activeCtrl == _pickupCtrl,
                 onChanged: (q) => _searchPlaces(q, _pickupCtrl),
+                onDismiss: () => setState(() => _suggestions = []),
               ),
+              if (_locationError == 'pickup')
+                Padding(
+                  padding: const EdgeInsets.only(top: 6, left: 4),
+                  child: Row(
+                    children: const [
+                      Icon(Icons.info_outline, color: _red, size: 14),
+                      SizedBox(width: 4),
+                      Text(
+                        'Please select a location from the suggestions',
+                        style: TextStyle(color: _red, fontSize: 12),
+                      ),
+                    ],
+                  ),
+                ),
               if (_suggestions.isNotEmpty && _activeCtrl == _pickupCtrl)
                 _SuggestionsList(
                   suggestions: _suggestions,
@@ -3864,7 +3965,22 @@ class _ScheduleBookingSheetState extends State<_ScheduleBookingSheet> {
                 icon: Icons.location_on_rounded,
                 isSearching: _searching && _activeCtrl == _destCtrl,
                 onChanged: (q) => _searchPlaces(q, _destCtrl),
+                onDismiss: () => setState(() => _suggestions = []),
               ),
+              if (_locationError == 'dest')
+                Padding(
+                  padding: const EdgeInsets.only(top: 6, left: 4),
+                  child: Row(
+                    children: const [
+                      Icon(Icons.info_outline, color: _red, size: 14),
+                      SizedBox(width: 4),
+                      Text(
+                        'Please select a location from the suggestions',
+                        style: TextStyle(color: _red, fontSize: 12),
+                      ),
+                    ],
+                  ),
+                ),
               if (_suggestions.isNotEmpty && _activeCtrl == _destCtrl)
                 _SuggestionsList(
                   suggestions: _suggestions,
@@ -3971,7 +4087,12 @@ class _BottomNav extends StatelessWidget {
   Widget build(BuildContext context) {
     final bottomPadding = MediaQuery.of(context).padding.bottom;
     return Container(
-      margin: EdgeInsets.fromLTRB(16, 8, 16, bottomPadding > 0 ? bottomPadding : 12),
+      margin: EdgeInsets.fromLTRB(
+        16,
+        8,
+        16,
+        bottomPadding > 0 ? bottomPadding : 12,
+      ),
       padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 10),
       decoration: BoxDecoration(
         color: _navy,
